@@ -19,7 +19,7 @@ class StakeRequest(BaseModel):
 
 
 class StakeResponse(BaseModel):
-    stake: str
+    stake: list
 
 
 @router.post("/stake", response_model=StakeResponse)
@@ -40,14 +40,14 @@ async def issue_stake(body: StakeRequest) -> StakeResponse:
             raise HTTPException(status_code=400, detail="Nonce expired")
 
         identity = await (await conn.execute(
-            "SELECT public_key, user_tag FROM key_registry WHERE fingerprint = %s",
+            "SELECT public_key, user_tag, display_name FROM key_registry WHERE fingerprint = %s",
             (body.fingerprint,),
         )).fetchone()
         if identity is None:
             raise HTTPException(status_code=404, detail="Fingerprint not registered")
 
-        public_key_pem, user_tag = identity
+        public_key_pem, user_tag, display_name = identity
         verify_client_signature(public_key_pem, body.nonce, body.signature)
 
-    token = mint_stake(body.fingerprint, user_tag)
-    return StakeResponse(stake=token)
+    stake = mint_stake(user_tag, public_key_pem, display_name)
+    return StakeResponse(stake=stake)

@@ -12,6 +12,7 @@ const sendBufSize = 64
 // Client represents one connected WebSocket peer.
 type Client struct {
 	id   string
+	fp   string // author fingerprint, set on first verified frame (sha256:hex)
 	conn *websocket.Conn
 	send chan []byte
 	hub  *Hub

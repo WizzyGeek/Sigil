@@ -6,7 +6,6 @@ interface Identity {
   handle: string
   publicKeySpki: ArrayBuffer
   privateKey: CryptoKey
-  stake: string | null
 }
 
 interface IdentityContextValue {
@@ -26,17 +25,15 @@ export function IdentityProvider({ children }: { children: React.ReactNode }) {
       if (!record) return
       const stored = localStorage.getItem('sigil:identity')
       if (!stored) return
-      const { fingerprint, handle, stake } = JSON.parse(stored) as {
+      const { fingerprint, handle } = JSON.parse(stored) as {
         fingerprint: string
         handle: string
-        stake: string | null
       }
       setIdentityState({
         fingerprint,
         handle,
         publicKeySpki: record.publicKeySpki,
         privateKey: record.privateKey,
-        stake,
       })
     })
   }, [])
@@ -45,7 +42,7 @@ export function IdentityProvider({ children }: { children: React.ReactNode }) {
     setIdentityState(id)
     localStorage.setItem(
       'sigil:identity',
-      JSON.stringify({ fingerprint: id.fingerprint, handle: id.handle, stake: id.stake }),
+      JSON.stringify({ fingerprint: id.fingerprint, handle: id.handle }),
     )
   }
 

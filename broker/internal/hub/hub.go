@@ -2,7 +2,6 @@ package hub
 
 import (
 	"crypto/rsa"
-	"fmt"
 	"log"
 	"net/http"
 	"sync"
@@ -20,25 +19,42 @@ type inboundEnvelope struct {
 
 // Hub manages all connected clients and their channel subscriptions.
 type Hub struct {
-	mu           sync.RWMutex
-	clients      map[string]*Client
+	mu            sync.RWMutex
+	clients       map[string]*Client
 	subscriptions map[string]map[string]bool // channel → set of client IDs
+	fingerprints  map[string]string          // author fingerprint → client ID (unicast index)
 
-	registryKey *rsa.PublicKey
+	registryKey       *rsa.PublicKey
+	minFreshnessScore int
+	maxFrameBytes     int
+	maxContentBytes   int
+	maxRelayBatch     int
 
 	register   chan *Client
 	unregister chan *Client
 	inbound    chan inboundEnvelope
 }
 
-func New(registryKey *rsa.PublicKey) *Hub {
+type Config struct {
+	MinFreshnessScore int
+	MaxFrameBytes     int
+	MaxContentBytes   int
+	MaxRelayBatch     int
+}
+
+func New(registryKey *rsa.PublicKey, cfg Config) *Hub {
 	return &Hub{
-		clients:       make(map[string]*Client),
-		subscriptions: make(map[string]map[string]bool),
-		registryKey:   registryKey,
-		register:      make(chan *Client, 16),
-		unregister:    make(chan *Client, 16),
-		inbound:       make(chan inboundEnvelope, 256),
+		clients:           make(map[string]*Client),
+		subscriptions:     make(map[string]map[string]bool),
+		fingerprints:      make(map[string]string),
+		registryKey:       registryKey,
+		minFreshnessScore: cfg.MinFreshnessScore,
+		maxFrameBytes:     cfg.MaxFrameBytes,
+		maxContentBytes:   cfg.MaxContentBytes,
+		maxRelayBatch:     cfg.MaxRelayBatch,
+		register:          make(chan *Client, 16),
+		unregister:        make(chan *Client, 16),
+		inbound:           make(chan inboundEnvelope, 256),
 	}
 }
 
@@ -58,6 +74,10 @@ func (h *Hub) Run() {
 				for _, subs := range h.subscriptions {
 					delete(subs, c.id)
 				}
+				// Remove from fingerprint index if this client had been identified.
+				if c.fp != "" {
+					delete(h.fingerprints, c.fp)
+				}
 			}
 			h.mu.Unlock()
 
@@ -68,24 +88,59 @@ func (h *Hub) Run() {
 }
 
 func (h *Hub) handleMessage(env inboundEnvelope) {
-	msg, err := protocol.ParseInbound(env.data)
-	if err != nil {
-		h.sendError(env.client, "invalid message format")
+	// Pre-check: reject oversized frames before any parsing or crypto work.
+	if len(env.data) > h.maxFrameBytes {
+		log.Printf("frame too large from %s: %d bytes (max %d)", env.client.id, len(env.data), h.maxFrameBytes)
 		return
 	}
 
-	switch msg.Type {
-	case protocol.CmdSubscribe:
-		h.subscribe(env.client, msg.Channel)
+	claims, err := protocol.VerifyUNT(env.data, h.registryKey)
+	if err != nil {
+		log.Printf("UNT verify failed from %s: %v", env.client.id, err)
+		return
+	}
 
-	case protocol.CmdUnsubscribe:
-		h.unsubscribeChannel(env.client, msg.Channel)
+	if claims.FreshnessScore < h.minFreshnessScore {
+		log.Printf("UNT freshness too low from %s: score=%d min=%d", env.client.id, claims.FreshnessScore, h.minFreshnessScore)
+		return
+	}
 
-	case protocol.CmdNoteResponse:
-		h.relayNote(env.client, msg.Channel, msg.UNT)
+	// Update fingerprint → connection index from every verified frame.
+	// jti deduplication is the client's responsibility (via IndexedDB).
+	if claims.AuthorFp != "" && env.client.fp == "" {
+		env.client.fp = claims.AuthorFp
+		h.mu.Lock()
+		h.fingerprints[claims.AuthorFp] = env.client.id
+		h.mu.Unlock()
+	}
+
+	// Route on verified type and channel — never trust unverified wire fields.
+	switch claims.Type {
+	case protocol.TypeSubscribe:
+		h.subscribe(env.client, claims.Channel)
+
+	case protocol.TypeUnsubscribe:
+		h.unsubscribeChannel(env.client, claims.Channel)
+
+	case protocol.TypeNote:
+		if len(claims.Content) > h.maxContentBytes {
+			log.Printf("note content too large from %s: %d bytes (max %d)", env.client.id, len(claims.Content), h.maxContentBytes)
+			return
+		}
+		h.fanout(env.client, claims.Channel, env.data)
+
+	case protocol.TypeRequestNotes:
+		h.fanout(env.client, claims.Channel, env.data)
+
+	case protocol.TypeNoteRelay:
+		if claims.RelayCount > h.maxRelayBatch {
+			log.Printf("note_relay batch too large from %s: %d (max %d)", env.client.id, claims.RelayCount, h.maxRelayBatch)
+			return
+		}
+		h.unicast(claims.To, env.data)
 
 	default:
-		h.sendError(env.client, fmt.Sprintf("unknown command: %s", msg.Type))
+		log.Printf("unknown UNT type %q from %s — dropped", claims.Type, env.client.id)
 	}
 }
 
@@ -106,28 +161,8 @@ func (h *Hub) unsubscribeChannel(c *Client, channel string) {
 	h.mu.Unlock()
 }
 
-func (h *Hub) relayNote(sender *Client, channel string, unt string) {
-	// Verify UNT before relaying
-	fetchAuthorKey := func(fp string) (*rsa.PublicKey, error) {
-		// In full implementation: fetch from registry HTTP API and cache
-		return nil, fmt.Errorf("author key fetch not yet implemented: %s", fp)
-	}
-
-	if _, err := protocol.VerifyUNT(unt, h.registryKey, fetchAuthorKey); err != nil {
-		log.Printf("UNT verification failed from %s: %v", sender.id, err)
-		h.sendError(sender, "UNT verification failed")
-		return
-	}
-
-	out, err := protocol.MarshalOutbound(protocol.OutboundMessage{
-		Type:    protocol.CmdNoteResponse,
-		Channel: channel,
-		UNT:     unt,
-	})
-	if err != nil {
-		return
-	}
-
+// fanout relays raw frame bytes to all channel subscribers except the sender.
+func (h *Hub) fanout(sender *Client, channel string, data []byte) {
 	h.mu.RLock()
 	subs := h.subscriptions[channel]
 	targets := make([]*Client, 0, len(subs))
@@ -139,22 +174,39 @@ func (h *Hub) relayNote(sender *Client, channel string, unt string) {
 	h.mu.RUnlock()
 
 	for _, c := range targets {
+		msg := make([]byte, len(data))
+		copy(msg, data)
 		select {
-		case c.send <- out:
+		case c.send <- msg:
 		default:
-			// drop if send buffer full (slow consumer)
+			// Drop if send buffer full (slow consumer).
 		}
 	}
 }
 
-func (h *Hub) sendError(c *Client, msg string) {
-	out, _ := protocol.MarshalOutbound(protocol.OutboundMessage{
-		Type:    protocol.CmdError,
-		Message: msg,
-	})
+// unicast delivers a frame to the single connection identified by fingerprint.
+func (h *Hub) unicast(fp string, data []byte) {
+	if fp == "" {
+		return
+	}
+	h.mu.RLock()
+	id, ok := h.fingerprints[fp]
+	var target *Client
+	if ok {
+		target = h.clients[id]
+	}
+	h.mu.RUnlock()
+
+	if target == nil {
+		log.Printf("unicast: no connection for fingerprint %s — dropped", fp)
+		return
+	}
+	msg := make([]byte, len(data))
+	copy(msg, data)
 	select {
-	case c.send <- out:
+	case target.send <- msg:
 	default:
+		// Drop if send buffer full.
 	}
 }
 

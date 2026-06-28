@@ -265,7 +265,7 @@ function RelayCanvas() {
 
     const onResize = () => build()
     window.addEventListener('resize', onResize)
-    requestAnimationFrame(() => { build(); draw() })
+    rafId = requestAnimationFrame(() => { build(); draw() })
 
     return () => {
       cancelAnimationFrame(rafId)

@@ -1,21 +1,21 @@
-/** Broker WebSocket client with auto-reconnect. */
+/** Broker WebSocket client. Every wire message is a UNTFrame: [payload_object, sig_b64]. */
 
-import type { ClientCommand, ServerCommand } from '../types/protocol'
+import type { UNTFrame } from '../types/protocol'
 
-type MessageHandler = (msg: ServerCommand) => void
+type FrameHandler = (frame: UNTFrame) => void
 type StatusHandler = (connected: boolean) => void
 
 export class BrokerClient {
   private ws: WebSocket | null = null
   private url: string
-  private onMessage: MessageHandler
+  private onFrame: FrameHandler
   private onStatus: StatusHandler
   private retryDelay = 1000
   private dead = false
 
-  constructor(url: string, onMessage: MessageHandler, onStatus: StatusHandler) {
+  constructor(url: string, onFrame: FrameHandler, onStatus: StatusHandler) {
     this.url = url
-    this.onMessage = onMessage
+    this.onFrame = onFrame
     this.onStatus = onStatus
     this.connect()
   }
@@ -31,8 +31,8 @@ export class BrokerClient {
 
     this.ws.onmessage = (ev) => {
       try {
-        const msg = JSON.parse(ev.data as string) as ServerCommand
-        this.onMessage(msg)
+        const frame = JSON.parse(ev.data as string) as UNTFrame
+        this.onFrame(frame)
       } catch {
         // ignore malformed frames
       }
@@ -51,9 +51,12 @@ export class BrokerClient {
     }
   }
 
-  send(cmd: ClientCommand) {
+  send(frame: UNTFrame) {
     if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify(cmd))
+      console.log('[broker] →', (frame[0] as Record<string, unknown>).type)
+      this.ws.send(JSON.stringify(frame))
+    } else {
+      console.error('[broker] send failed — socket not open', { readyState: this.ws?.readyState })
     }
   }
 

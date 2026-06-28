@@ -4,110 +4,203 @@ import (
 	"crypto"
 	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
-	"strings"
-	"time"
 )
 
-// UNTClaims are the outer JWT claims of a Unified Note Token.
+// UNTClaims holds the verified outer payload fields from a UNT frame.
+// Fields tagged `json:"-"` are computed during verification, never transmitted.
 type UNTClaims struct {
-	Iss   string `json:"iss"`
-	Sub   string `json:"sub"`
-	Iat   int64  `json:"iat"`
-	Exp   int64  `json:"exp"`
-	Jti   string `json:"jti"`
-	Body  string `json:"body"`
-	Inner string `json:"inner"`
+	Jti      string  `json:"jti"`
+	Iat      int64   `json:"iat"`
+	Type     string  `json:"type"`
+	Channel  string  `json:"channel"`
+	Content  string  `json:"content,omitempty"`
+	ReplyTo  *string `json:"reply_to,omitempty"`
+	StakeIat int64   `json:"stake_iat"`
+	To       string  `json:"to,omitempty"` // note_relay: unicast target fingerprint
+
+	FreshnessScore int    `json:"-"` // computed from outer.iat - stake.iat
+	AuthorFp       string `json:"-"` // sha256:hex(SHA256(SPKI DER of stake.public_key))
+	RelayCount     int    `json:"-"` // len(relays) for note_relay frames
 }
 
-// StakeClaims are the inner JWT claims (registry-signed stake).
+// StakeClaims holds the verified inner stake payload fields (registry-signed).
+//
+// Omitted intentionally:
+//   - jti: unused in any verification step
+//   - sub (fingerprint): computable from SHA256(SPKI(public_key))
+//   - exp: stake is a historical notarization, not an access token
 type StakeClaims struct {
-	Iss    string `json:"iss"`
-	Sub    string `json:"sub"`
-	Handle string `json:"handle"`
-	Iat    int64  `json:"iat"`
-	Exp    int64  `json:"exp"`
+	Iss         string  `json:"iss"`
+	Iat         int64   `json:"iat"`
+	PublicKey   string  `json:"public_key"` // author's RSA-4096 public key PEM
+	UserTag     string  `json:"user_tag"`   // @handle (local part only)
+	DisplayName *string `json:"display_name"`
 }
 
-func decodeSegment(s string) ([]byte, error) {
-	s = strings.ReplaceAll(s, "-", "+")
-	s = strings.ReplaceAll(s, "_", "/")
-	for len(s)%4 != 0 {
-		s += "="
+// canonicalJSONBytes returns the canonical JSON encoding of a raw JSON value.
+// Object keys are sorted alphabetically at every nesting level.
+// This is the deterministic signing input — identical across all implementations.
+// In Go, json.Marshal sorts map keys, so round-tripping through interface{} achieves this.
+func canonicalJSONBytes(raw json.RawMessage) ([]byte, error) {
+	var v interface{}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return nil, err
 	}
-	return base64.StdEncoding.DecodeString(s)
+	return json.Marshal(v)
 }
 
-func parseJWTClaims(token string, out any) error {
-	parts := strings.SplitN(token, ".", 3)
-	if len(parts) != 3 {
-		return errors.New("malformed JWT")
+// FingerprintFromPEM computes sha256:hex(SHA256(SPKI DER bytes)) from a public key PEM.
+// The DER bytes are the raw contents of the PEM block — no export needed.
+func FingerprintFromPEM(pemStr string) (string, error) {
+	block, _ := pem.Decode([]byte(pemStr))
+	if block == nil {
+		return "", errors.New("invalid PEM block")
 	}
-	payload, err := decodeSegment(parts[1])
+	digest := sha256.Sum256(block.Bytes)
+	return "sha256:" + hex.EncodeToString(digest[:]), nil
+}
+
+func parsePEMPublicKey(pemStr string) (*rsa.PublicKey, error) {
+	block, _ := pem.Decode([]byte(pemStr))
+	if block == nil {
+		return nil, errors.New("failed to decode PEM block")
+	}
+	pub, err := x509.ParsePKIXPublicKey(block.Bytes)
 	if err != nil {
-		return fmt.Errorf("decode payload: %w", err)
+		return nil, fmt.Errorf("parse public key: %w", err)
 	}
-	return json.Unmarshal(payload, out)
+	rsaPub, ok := pub.(*rsa.PublicKey)
+	if !ok {
+		return nil, errors.New("not an RSA public key")
+	}
+	return rsaPub, nil
 }
 
-func verifyRS256(token string, key *rsa.PublicKey) error {
-	parts := strings.SplitN(token, ".", 3)
-	if len(parts) != 3 {
-		return errors.New("malformed JWT")
+func verifyRSASig(key *rsa.PublicKey, payload json.RawMessage, sigB64 string) error {
+	canon, err := canonicalJSONBytes(payload)
+	if err != nil {
+		return fmt.Errorf("canonicalize: %w", err)
 	}
-	sigInput := []byte(parts[0] + "." + parts[1])
-	digest := sha256.Sum256(sigInput)
-	sig, err := decodeSegment(parts[2])
+	sigBytes, err := base64.StdEncoding.DecodeString(sigB64)
 	if err != nil {
 		return fmt.Errorf("decode sig: %w", err)
 	}
-	return rsa.VerifyPKCS1v15(key, crypto.SHA256, digest[:], sig)
+	digest := sha256.Sum256(canon)
+	return rsa.VerifyPKCS1v15(key, crypto.SHA256, digest[:], sigBytes)
 }
 
-// VerifyUNT performs the 4-step broker UNT verification:
-//  1. Decode outer claims (get inner stake)
-//  2. Verify inner stake with registry key, check expiry
-//  3. Confirm inner.sub == outer.iss
-//  4. Verify outer signature with the author's public key (fetched by caller)
-func VerifyUNT(unt string, registryKey *rsa.PublicKey, fetchAuthorKey func(fp string) (*rsa.PublicKey, error)) (*UNTClaims, error) {
-	// Step 1: decode outer
-	var outer UNTClaims
-	if err := parseJWTClaims(unt, &outer); err != nil {
-		return nil, fmt.Errorf("outer decode: %w", err)
+// VerifyUNT performs 4-step UNT verification using only the registry public key.
+// The author's public key is embedded in the stake — no network calls required.
+//
+//  1. Parse frame as [outer_payload, outer_sig_b64]
+//  2. Verify stake signature with registry key → trusted stake claims + author public key
+//  3. Verify outer signature with author key (from verified stake)
+//  4. Verify stake_iat binding (prevents stake-swap attacks)
+//
+// Returns verified claims with a computed FreshnessScore.
+// The caller is responsible for jti deduplication and freshness gating.
+func VerifyUNT(frameBytes []byte, registryKey *rsa.PublicKey) (*UNTClaims, error) {
+	// Step 1: parse frame as [outer_payload, outer_sig_b64]
+	var frame [2]json.RawMessage
+	if err := json.Unmarshal(frameBytes, &frame); err != nil {
+		return nil, fmt.Errorf("parse frame: %w", err)
+	}
+	outerRaw := frame[0]
+	var outerSig string
+	if err := json.Unmarshal(frame[1], &outerSig); err != nil {
+		return nil, fmt.Errorf("parse outer sig: %w", err)
 	}
 
-	// Step 2: verify + decode inner stake
-	if err := verifyRS256(outer.Inner, registryKey); err != nil {
-		return nil, fmt.Errorf("inner stake sig: %w", err)
+	// Extract stake field (unverified) from outer payload
+	var outerMap map[string]json.RawMessage
+	if err := json.Unmarshal(outerRaw, &outerMap); err != nil {
+		return nil, fmt.Errorf("parse outer payload: %w", err)
+	}
+	stakeRaw, ok := outerMap["stake"]
+	if !ok {
+		return nil, errors.New("missing stake field")
+	}
+
+	// Parse stake as [stake_payload, stake_sig_b64]
+	var stakeFrame [2]json.RawMessage
+	if err := json.Unmarshal(stakeRaw, &stakeFrame); err != nil {
+		return nil, fmt.Errorf("parse stake frame: %w", err)
+	}
+	stakePayloadRaw := stakeFrame[0]
+	var stakeSig string
+	if err := json.Unmarshal(stakeFrame[1], &stakeSig); err != nil {
+		return nil, fmt.Errorf("parse stake sig: %w", err)
+	}
+
+	// Step 2: verify stake signature with registry key
+	if err := verifyRSASig(registryKey, stakePayloadRaw, stakeSig); err != nil {
+		return nil, fmt.Errorf("stake sig: %w", err)
 	}
 	var stake StakeClaims
-	if err := parseJWTClaims(outer.Inner, &stake); err != nil {
-		return nil, fmt.Errorf("inner decode: %w", err)
-	}
-	if time.Now().Unix() > stake.Exp {
-		return nil, errors.New("stake expired")
+	if err := json.Unmarshal(stakePayloadRaw, &stake); err != nil {
+		return nil, fmt.Errorf("decode stake: %w", err)
 	}
 
-	// Step 3: fingerprint binding
-	if stake.Sub != outer.Iss {
-		return nil, errors.New("stake fingerprint mismatch")
-	}
-
-	// Step 4: verify outer with author key
-	authorKey, err := fetchAuthorKey(outer.Iss)
+	// Step 3: verify outer signature with author's public key (embedded in verified stake)
+	authorKey, err := parsePEMPublicKey(stake.PublicKey)
 	if err != nil {
-		return nil, fmt.Errorf("fetch author key: %w", err)
+		return nil, fmt.Errorf("parse author key: %w", err)
 	}
-	if err := verifyRS256(unt, authorKey); err != nil {
+	if err := verifyRSASig(authorKey, outerRaw, outerSig); err != nil {
 		return nil, fmt.Errorf("outer sig: %w", err)
 	}
 
-	if time.Now().Unix() > outer.Exp {
-		return nil, errors.New("UNT expired")
+	// Step 4: decode outer claims and verify stake_iat binding
+	var outer UNTClaims
+	if err := json.Unmarshal(outerRaw, &outer); err != nil {
+		return nil, fmt.Errorf("decode outer claims: %w", err)
+	}
+	if outer.StakeIat != stake.Iat {
+		return nil, errors.New("stake_iat mismatch")
+	}
+
+	outer.FreshnessScore = computeFreshnessScore(outer.Iat - stake.Iat)
+
+	// Compute author fingerprint from verified stake public key.
+	fp, err := FingerprintFromPEM(stake.PublicKey)
+	if err != nil {
+		return nil, fmt.Errorf("fingerprint: %w", err)
+	}
+	outer.AuthorFp = fp
+
+	// For note_relay: count relays entries for the hub's batch size check.
+	if outer.Type == "note_relay" {
+		if relaysRaw, ok := outerMap["relays"]; ok {
+			var relays []json.RawMessage
+			if err := json.Unmarshal(relaysRaw, &relays); err == nil {
+				outer.RelayCount = len(relays)
+			}
+		}
 	}
 
 	return &outer, nil
+}
+
+func computeFreshnessScore(deltaT int64) int {
+	switch {
+	case deltaT < 5:
+		return 5
+	case deltaT < 30:
+		return 4
+	case deltaT < 180:
+		return 3
+	case deltaT < 1800:
+		return 2
+	case deltaT < 86400:
+		return 1
+	default:
+		return 0
+	}
 }

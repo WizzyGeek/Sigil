@@ -1,13 +1,13 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react'
 import { useIdentity } from '../store/identity'
 import { BrokerClient } from '../api/broker'
-import { saveNote, getNotesByChannel, hasNote, deleteNotesByAuthor } from '../store/notes'
-import { verifyUnt } from '../crypto/unt'
+import { saveNote, getNotesByChannel, hasNote } from '../store/notes'
+import { verifyUnt, buildUnt, buildCommand } from '../crypto/unt'
 import { importPublicKeyPem } from '../crypto/jwt'
-import { fetchRegistryPublicKey, lookupKey } from '../api/registry'
+import { fetchRegistryPublicKey, requestChallenge, requestStake } from '../api/registry'
 import { loadKeypair } from '../crypto/keystore'
 import { fingerprintFromSpki } from '../crypto/fingerprint'
-import type { Note, ServerCommand } from '../types/protocol'
+import type { Note, UNTFrame, StakeFrame } from '../types/protocol'
 import Header from '../components/Header'
 import Sidebar, { type ChannelItem } from '../components/Sidebar'
 import NoteList from '../components/MasonryGrid'
@@ -50,15 +50,9 @@ export default React.memo(function AppPage() {
   const [modalRegistering, setModalRegistering] = useState(false)
   const [modalRegError, setModalRegError] = useState('')
 
-  // Key cache: fingerprint → CryptoKey
-  const keyCache = useRef(new Map<string, CryptoKey>())
-  const fetchAuthorKey = useCallback(async (fp: string): Promise<CryptoKey> => {
-    if (keyCache.current.has(fp)) return keyCache.current.get(fp)!
-    const { public_key } = await lookupKey(fp)
-    const key = await importPublicKeyPem(public_key)
-    keyCache.current.set(fp, key)
-    return key
-  }, [])
+  // Stake cache: re-use within 25s (freshness score ≥ 3), fetch fresh otherwise
+  const stakeCache = useRef<StakeFrame | null>(null)
+  const stakeCacheAt = useRef<number>(0)
 
   useEffect(() => {
     fetchRegistryPublicKey()
@@ -70,46 +64,153 @@ export default React.memo(function AppPage() {
   const activeChannelRef = useRef(activeChannel)
   useEffect(() => { activeChannelRef.current = activeChannel }, [activeChannel])
 
-  const handleMessage = useCallback(
-    async (msg: ServerCommand) => {
+  const handleFrame = useCallback(
+    async (frame: UNTFrame) => {
       if (!registryKey) return
+      const payload = frame[0] as Record<string, unknown>
 
-      if (msg.type === 'note_response') {
+      if (payload.type === 'request_notes') {
+        if (!broker || !identity) return
+        // Log(n) picking: respond only if sha256(jti || own_fp)[0] < 0x40 (~25%)
+        const jtiBytes = new TextEncoder().encode(payload.jti as string)
+        const fpBytes = new TextEncoder().encode(identity.fingerprint)
+        const combined = new Uint8Array(jtiBytes.length + fpBytes.length)
+        combined.set(jtiBytes)
+        combined.set(fpBytes, jtiBytes.length)
+        const hashBuf = await crypto.subtle.digest('SHA-256', combined)
+        if (new Uint8Array(hashBuf)[0] >= 0x40) return
+
+        const channel = payload.channel as string
+        const till = (payload.till as number | undefined) ?? Math.floor(Date.now() / 1000)
+        const cached = await getNotesByChannel(channel)
+        const relays = cached
+          .filter(n => n.issuedAt < till)
+          .sort((a, b) => b.issuedAt - a.issuedAt)
+          .slice(0, 25)
+          .map(n => { try { return JSON.parse(n.raw) as UNTFrame } catch { return null } })
+          .filter((f): f is UNTFrame => f !== null)
+        if (relays.length === 0) return
+
+        // Derive requester fingerprint from verified stake public key
+        const stakePayload = (payload.stake as [Record<string, unknown>, string])[0]
+        const pem = stakePayload.public_key as string
+        const spkiBytes = Uint8Array.from(
+          atob(pem.replace(/-----[^-]+-----/g, '').replace(/\s/g, '')),
+          c => c.charCodeAt(0),
+        )
+        const digest = await crypto.subtle.digest('SHA-256', spkiBytes)
+        const to = 'sha256:' + Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('')
+
         try {
-          const note = await verifyUnt(msg.unt, registryKey, fetchAuthorKey)
-          if (await hasNote(note.jti)) return
-          await saveNote(note)
-          if (note.channel === activeChannelRef.current) {
-            setNotes(prev => [...prev, note])
-          } else {
-            setChannels(prev =>
-              prev.map(ch => ch.name === note.channel ? { ...ch, unread: ch.unread + 1 } : ch)
-            )
-          }
-        } catch {
-          // drop unverifiable notes
+          const stake = await getStake()
+          const frame = await buildCommand('note_relay', channel, stake, identity.privateKey, { to, relays })
+          broker.send(frame)
+        } catch (err) {
+          console.warn('[request_notes] relay failed:', err)
         }
+        return
       }
 
-      if (msg.type === 'revoke_key') {
-        await deleteNotesByAuthor(msg.fingerprint)
-        setNotes(prev => prev.filter(n => n.authorFp !== msg.fingerprint))
+      if (payload.type === 'note_relay') {
+        const relays = (payload.relays as UNTFrame[] | undefined) ?? []
+        for (const inner of relays) {
+          try {
+            const note = await verifyUnt(inner, registryKey)
+            if (await hasNote(note.jti)) continue
+            await saveNote(note)
+            if (note.channel === activeChannelRef.current) {
+              setNotes(prev => [...prev, note].sort((a, b) => a.issuedAt - b.issuedAt))
+            } else {
+              setChannels(prev =>
+                prev.map(ch => ch.name === note.channel ? { ...ch, unread: ch.unread + 1 } : ch)
+              )
+            }
+          } catch (err) {
+            console.warn('[note_relay] inner verify failed:', err)
+          }
+        }
+        return
+      }
+
+      if (payload.type !== 'note') return
+      try {
+        const note = await verifyUnt(frame, registryKey)
+        if (await hasNote(note.jti)) return
+        await saveNote(note)
+        if (note.channel === activeChannelRef.current) {
+          setNotes(prev => [...prev, note])
+        } else {
+          setChannels(prev =>
+            prev.map(ch => ch.name === note.channel ? { ...ch, unread: ch.unread + 1 } : ch)
+          )
+        }
+      } catch (err) {
+        console.warn('[handleFrame] dropped unverifiable frame:', err)
       }
     },
-    [registryKey, fetchAuthorKey],
+    [registryKey, broker],
   )
 
-  useEffect(() => {
-    const client = new BrokerClient(DEFAULT_BROKER, handleMessage, setConnected)
-    setBroker(client)
-    return () => client.close()
-  }, [handleMessage])
+  const handleFrameRef = useRef(handleFrame)
+  useEffect(() => { handleFrameRef.current = handleFrame }, [handleFrame])
 
   useEffect(() => {
-    if (!broker || !identity) return
-    broker.send({ type: 'subscribe', channel: activeChannel, unt: identity.stake ?? '' })
-    getNotesByChannel(activeChannel).then(setNotes)
-  }, [broker, activeChannel, identity])
+    let client: BrokerClient | null = null
+    const t = setTimeout(() => {
+      client = new BrokerClient(
+        DEFAULT_BROKER,
+        (frame) => handleFrameRef.current(frame),
+        setConnected,
+      )
+      setBroker(client)
+    }, 0)
+    return () => {
+      clearTimeout(t)
+      client?.close()
+    }
+  }, [])
+
+  const getStake = useCallback(async (): Promise<StakeFrame> => {
+    if (!identity) throw new Error('No identity')
+    const now = Math.floor(Date.now() / 1000)
+    if (stakeCache.current && now - stakeCacheAt.current <= 25) {
+      return stakeCache.current
+    }
+    const { nonce } = await requestChallenge(identity.fingerprint)
+    const sigBuf = await crypto.subtle.sign(
+      'RSASSA-PKCS1-v1_5',
+      identity.privateKey,
+      new TextEncoder().encode(nonce),
+    )
+    const signature = btoa(String.fromCharCode(...new Uint8Array(sigBuf)))
+    const { stake } = await requestStake({ fingerprint: identity.fingerprint, nonce, signature })
+    stakeCache.current = stake
+    stakeCacheAt.current = now
+    return stake
+  }, [identity])
+
+  useEffect(() => {
+    if (!broker || !identity || !connected) return
+    setNotes([])
+    ;(async () => {
+      try {
+        const stake = await getStake()
+        broker.send(await buildCommand('subscribe', activeChannel, stake, identity.privateKey))
+        broker.send(await buildCommand('request_notes', activeChannel, stake, identity.privateKey, {
+          till: Math.floor(Date.now() / 1000),
+        }))
+        // Merge DB notes with any live notes that already arrived while we were async.
+        const dbNotes = await getNotesByChannel(activeChannel)
+        setNotes(prev => {
+          const seen = new Set(prev.map(n => n.jti))
+          const merged = [...dbNotes.filter(n => !seen.has(n.jti)), ...prev]
+          return merged.sort((a, b) => a.issuedAt - b.issuedAt)
+        })
+      } catch (err) {
+        console.error('[subscribe] failed:', err)
+      }
+    })()
+  }, [broker, activeChannel, identity, connected, getStake])
 
   // Close settings on outside click
   useEffect(() => {
@@ -154,15 +255,26 @@ export default React.memo(function AppPage() {
   }
 
   const sendNote = useCallback(
-    async (_body: string) => {
-      if (!broker || !identity?.stake) return
-      broker.send({
-        type: 'note_response',
-        channel: activeChannel,
-        unt: identity.stake,
-      })
+    async (content: string) => {
+      if (!broker || !identity || !registryKey) {
+        console.error('[send] aborted — broker:', !!broker, 'identity:', !!identity, 'registryKey:', !!registryKey)
+        return
+      }
+      try {
+        const stake = await getStake()
+        const frame = await buildUnt(content, activeChannel, stake, identity.privateKey)
+        broker.send(frame)
+        // Broker excludes sender from fanout, so add own note to local state directly.
+        const note = await verifyUnt(frame, registryKey)
+        if (!(await hasNote(note.jti))) {
+          await saveNote(note)
+          setNotes(prev => [...prev, note])
+        }
+      } catch (err) {
+        console.error('[send] failed:', err)
+      }
     },
-    [broker, identity, activeChannel],
+    [broker, identity, activeChannel, getStake, registryKey],
   )
 
   async function connectRegistry() {

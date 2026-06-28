@@ -1,57 +1,50 @@
 /**
- * Minimal RS256 JWT construction and verification using Web Crypto API.
- * No external library — per protocol spec.
+ * Frame signing and verification using Web Crypto (RSASSA-PKCS1-v1_5 RS256).
+ * No base64url, no JWT compact form — wire format is [payload_object, sig_b64].
+ *
+ * Signing input: canonical JSON of the payload (keys sorted recursively).
+ * Signature: base64-encoded RSA-4096 PKCS1v15 SHA-256.
  */
 
-function b64url(buf: ArrayBuffer): string {
-  return btoa(String.fromCharCode(...new Uint8Array(buf)))
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=/g, '')
+import type { UNTFrame } from '../types/protocol'
+
+function canonicalJson(value: unknown): unknown {
+  if (value === null || typeof value !== 'object') return value
+  if (Array.isArray(value)) return value.map(canonicalJson)
+  const obj = value as Record<string, unknown>
+  const sorted: Record<string, unknown> = {}
+  for (const key of Object.keys(obj).sort()) {
+    sorted[key] = canonicalJson(obj[key])
+  }
+  return sorted
 }
 
-function b64urlEncode(str: string): string {
-  return btoa(unescape(encodeURIComponent(str)))
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=/g, '')
+export function canonicalJsonString(value: unknown): string {
+  return JSON.stringify(canonicalJson(value))
 }
 
-function b64urlDecode(s: string): string {
-  s = s.replace(/-/g, '+').replace(/_/g, '/')
-  while (s.length % 4) s += '='
-  return atob(s)
+/** Sign a payload object. Returns a 2-part frame [payload, sig_b64]. */
+export async function signFrame(
+  payload: Record<string, unknown>,
+  privateKey: CryptoKey,
+): Promise<UNTFrame> {
+  const bytes = new TextEncoder().encode(canonicalJsonString(payload))
+  const sigBuf = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', privateKey, bytes)
+  const sig = btoa(String.fromCharCode(...new Uint8Array(sigBuf)))
+  return [payload, sig]
 }
 
-const HEADER = b64urlEncode(JSON.stringify({ alg: 'RS256', typ: 'JWT' }))
-
-/** Sign a payload with the given CryptoKey (RSASSA-PKCS1-v1_5). */
-export async function signJwt(payload: Record<string, unknown>, privateKey: CryptoKey): Promise<string> {
-  const body = b64urlEncode(JSON.stringify(payload))
-  const signingInput = `${HEADER}.${body}`
-  const enc = new TextEncoder()
-  const sig = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', privateKey, enc.encode(signingInput))
-  return `${signingInput}.${b64url(sig)}`
-}
-
-/** Verify a JWT against a CryptoKey (RSASSA-PKCS1-v1_5) and return its payload. */
-export async function verifyJwt(token: string, publicKey: CryptoKey): Promise<Record<string, unknown>> {
-  const parts = token.split('.')
-  if (parts.length !== 3) throw new Error('Malformed JWT')
-  const [header, body, sigB64] = parts
-  const enc = new TextEncoder()
-  const signingInput = enc.encode(`${header}.${body}`)
-  const sig = Uint8Array.from(b64urlDecode(sigB64), c => c.charCodeAt(0))
-  const valid = await crypto.subtle.verify('RSASSA-PKCS1-v1_5', publicKey, sig, signingInput)
-  if (!valid) throw new Error('JWT signature invalid')
-  return JSON.parse(b64urlDecode(body))
-}
-
-/** Decode a JWT without verifying (for inspecting claims). */
-export function decodeJwt(token: string): Record<string, unknown> {
-  const parts = token.split('.')
-  if (parts.length !== 3) throw new Error('Malformed JWT')
-  return JSON.parse(b64urlDecode(parts[1]))
+/** Verify a [payload, sig_b64] frame. Throws if invalid. Returns the trusted payload. */
+export async function verifyFrame<T>(
+  frame: [unknown, string],
+  publicKey: CryptoKey,
+): Promise<T> {
+  const [payload, sigB64] = frame
+  const bytes = new TextEncoder().encode(canonicalJsonString(payload))
+  const sig = Uint8Array.from(atob(sigB64), c => c.charCodeAt(0))
+  const valid = await crypto.subtle.verify('RSASSA-PKCS1-v1_5', publicKey, sig, bytes)
+  if (!valid) throw new Error('signature invalid')
+  return payload as T
 }
 
 /** Import a PEM public key for verification. */

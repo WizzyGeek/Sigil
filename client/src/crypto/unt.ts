@@ -1,82 +1,111 @@
 /**
- * UNT (Unified Note Token) assembly and 4-step verification.
- * Outer JWT: author-signed. Inner JWT: registry-signed stake embedded in outer payload.
+ * UNT (Unified Note Token) assembly and verification.
+ *
+ * Wire format: [payload_object, sig_b64] — 2-part JSON array.
+ * The stake (inner frame) is embedded in the outer payload as a nested [stake_payload, sig_b64].
+ *
+ * Verification (4 steps):
+ *   1. Parse outer frame — extract payload and stake
+ *   2. Verify stake with registry public key → trusted stake claims
+ *   3. Verify outer with stake.public_key → trusted outer claims
+ *   4. Verify stake_iat == stake.iat, deduplicate by jti, compute freshness
+ *
+ * Only the registry public key is needed — no network calls at verify time.
  */
 
-import { signJwt, verifyJwt, decodeJwt } from './jwt'
-import type { UNTOuterClaims, UNTInnerClaims, Note, FreshnessScore } from '../types/protocol'
+import { signFrame, verifyFrame, importPublicKeyPem } from './jwt'
+import { fingerprintFromSpki } from './fingerprint'
+import type { UNTOuterClaims, UNTInnerClaims, UNTFrame, StakeFrame, Note, FreshnessScore } from '../types/protocol'
 
-/** Build and sign a UNT. `stake` is the inner JWT from the registry. */
+/** Build and sign a note UNT. Stake is the 2-part frame from the registry. */
 export async function buildUnt(
-  body: string,
+  content: string,
   channel: string,
-  stake: string,
+  stake: StakeFrame,
   privateKey: CryptoKey,
-  authorFp: string,
-): Promise<string> {
-  const now = Math.floor(Date.now() / 1000)
+): Promise<UNTFrame> {
   const payload: UNTOuterClaims = {
-    iss: authorFp,
-    sub: channel,
-    iat: now,
-    exp: now + 3600 * 24 * 365,
     jti: crypto.randomUUID(),
-    body,
-    inner: stake,
+    iat: Math.floor(Date.now() / 1000),
+    type: 'note',
+    channel,
+    content,
+    reply_to: null,
+    stake,
+    stake_iat: stake[0].iat,
   }
-  return signJwt(payload as unknown as Record<string, unknown>, privateKey)
+  return signFrame(payload as unknown as Record<string, unknown>, privateKey)
+}
+
+/** Build and sign a control UNT (subscribe / unsubscribe / request_notes / note_relay). */
+export async function buildCommand(
+  type: 'subscribe' | 'unsubscribe' | 'request_notes' | 'note_relay',
+  channel: string,
+  stake: StakeFrame,
+  privateKey: CryptoKey,
+  extra?: Record<string, unknown>,
+): Promise<UNTFrame> {
+  const payload: Record<string, unknown> = {
+    jti: crypto.randomUUID(),
+    iat: Math.floor(Date.now() / 1000),
+    type,
+    channel,
+    stake,
+    stake_iat: stake[0].iat,
+    ...extra,
+  }
+  return signFrame(payload, privateKey)
 }
 
 /**
- * 4-step UNT verification:
- * 1. Decode outer claims without verifying (get author fingerprint + inner stake)
- * 2. Verify inner stake JWT with registry public key
- * 3. Confirm inner.sub matches outer.iss (same fingerprint)
- * 4. Fetch author public key from registry, verify outer signature
+ * Verify a UNT frame using only the registry public key.
+ * Throws on any failure. Only call this for type: "note" frames.
  */
 export async function verifyUnt(
-  unt: string,
+  frame: UNTFrame,
   registryPublicKey: CryptoKey,
-  fetchAuthorKey: (fp: string) => Promise<CryptoKey>,
 ): Promise<Note> {
-  // Step 1: Decode outer (unverified) to get iss and inner stake
-  const outerRaw = decodeJwt(unt) as unknown as UNTOuterClaims
+  const [outerPayload, outerSig] = frame
+  const outer = outerPayload as unknown as UNTOuterClaims
 
-  // Step 2: Verify inner stake with registry key
-  const innerClaims = await verifyJwt(outerRaw.inner, registryPublicKey) as unknown as UNTInnerClaims
+  // Step 2: verify stake with registry key → trusted stake claims
+  const [stakePayload, stakeSig] = outer.stake
+  const inner = await verifyFrame<UNTInnerClaims>([stakePayload, stakeSig], registryPublicKey)
 
-  // Step 3: Stake sub must match outer iss
-  if (innerClaims.sub !== outerRaw.iss) {
-    throw new Error('UNT stake fingerprint mismatch')
+  // Step 3: verify outer with author key embedded in the stake
+  const authorKey = await importPublicKeyPem(inner.public_key)
+  await verifyFrame<UNTOuterClaims>([outerPayload, outerSig], authorKey)
+
+  // Step 4: stake_iat binding
+  if (outer.stake_iat !== inner.iat) {
+    throw new Error('stake_iat mismatch — possible stake swap attack')
   }
 
-  // Step 4: Fetch and verify outer with author public key
-  const authorKey = await fetchAuthorKey(outerRaw.iss)
-  await verifyJwt(unt, authorKey)
-
-  const now = Math.floor(Date.now() / 1000)
-  const freshnessScore = computeFreshnessScore(outerRaw.iat, now)
+  // Derive fingerprint from PEM bytes directly — PEM body IS the SPKI DER
+  const spkiBytes = Uint8Array.from(
+    atob(inner.public_key.replace(/-----[^-]+-----/g, '').replace(/\s/g, '')),
+    c => c.charCodeAt(0),
+  )
+  const authorFp = 'sha256:' + await fingerprintFromSpki(spkiBytes.buffer)
 
   return {
-    jti: outerRaw.jti,
-    channel: outerRaw.sub,
-    body: outerRaw.body,
-    author: innerClaims.handle,
-    authorFp: outerRaw.iss,
-    registry: innerClaims.iss,
-    issuedAt: outerRaw.iat,
-    freshnessScore,
-    raw: unt,
+    jti: outer.jti,
+    channel: outer.channel,
+    body: outer.content ?? '',
+    author: `${inner.user_tag}@${inner.iss}`,
+    authorFp,
+    registry: inner.iss,
+    issuedAt: outer.iat,
+    freshnessScore: computeFreshnessScore(outer.iat - inner.iat),
+    raw: JSON.stringify(frame),
   }
 }
 
-/** Compute freshness score (0–5 locks) based on how recently the note was issued. */
-function computeFreshnessScore(iat: number, now: number): FreshnessScore {
-  const ageSeconds = now - iat
-  if (ageSeconds < 60)        return 5
-  if (ageSeconds < 300)       return 4
-  if (ageSeconds < 3600)      return 3
-  if (ageSeconds < 86400)     return 2
-  if (ageSeconds < 86400 * 7) return 1
+function computeFreshnessScore(deltaT: number): FreshnessScore {
+  if (deltaT < 5)     return 5
+  if (deltaT < 30)    return 4
+  if (deltaT < 180)   return 3
+  if (deltaT < 1800)  return 2
+  if (deltaT < 86400) return 1
   return 0
 }

@@ -21,3 +21,5 @@ broker/.env
 .DS_Store
 .idea/
 .vscode/
+
+design/

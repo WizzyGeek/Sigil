@@ -1,10 +1,11 @@
-"""Registry RSA key management and JWT minting."""
+"""Registry RSA key management and stake frame minting."""
 
+import base64
+import json
 import time
-import uuid
-from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey, RSAPublicKey
-import jwt
 
 from .config import settings
 
@@ -37,20 +38,24 @@ def get_public_key() -> RSAPublicKey:
     return _public_key
 
 
-def mint_stake(fingerprint: str, user_tag: str, ttl_seconds: int = 86400 * 30) -> str:
-    """Issue a signed stake JWT for a registered identity."""
-    now = int(time.time())
+def mint_stake(user_tag: str, public_key_pem: str, display_name: str | None = None) -> list:
+    """Issue a signed stake frame [payload, sig_b64] for a registered identity.
+
+    Signing input: canonical JSON (keys sorted, no whitespace) of the payload.
+    Signature: RSA-PKCS1v15 SHA-256, standard base64-encoded.
+
+    Fields omitted intentionally:
+      - sub/fingerprint: computable by SHA256-ing public_key SPKI bytes
+      - exp: stake is a historical notarization, not an access token (no expiry per spec)
+    """
     payload = {
+        "display_name": display_name,
+        "iat": int(time.time()),
         "iss": settings.registry_domain,
-        "sub": fingerprint,
-        "handle": f"@{user_tag}@{settings.registry_domain}",
-        "iat": now,
-        "exp": now + ttl_seconds,
-        "jti": str(uuid.uuid4()),
+        "public_key": public_key_pem,
+        "user_tag": f"@{user_tag}",
     }
-    return jwt.encode(payload, get_private_key(), algorithm="RS256")
-
-
-def verify_stake(token: str) -> dict:
-    """Verify a stake JWT and return its claims."""
-    return jwt.decode(token, get_public_key(), algorithms=["RS256"])
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    sig_bytes = get_private_key().sign(canonical, padding.PKCS1v15(), hashes.SHA256())
+    sig_b64 = base64.b64encode(sig_bytes).decode()
+    return [payload, sig_b64]

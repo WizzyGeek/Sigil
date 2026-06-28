@@ -23,7 +23,7 @@ export async function saveNote(note: Note): Promise<void> {
 export async function getNotesByChannel(channel: string): Promise<Note[]> {
   const db = await notesDb()
   const notes = await db.getAllFromIndex(STORE, 'channel', channel)
-  return notes.sort((a, b) => b.issuedAt - a.issuedAt)
+  return notes.sort((a, b) => a.issuedAt - b.issuedAt)
 }
 
 export async function hasNote(jti: string): Promise<boolean> {

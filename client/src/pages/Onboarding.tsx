@@ -112,7 +112,6 @@ export default React.memo(function Onboarding({ onComplete }: Props) {
         handle: result.handle,
         publicKeySpki: record.publicKeySpki,
         privateKey: record.privateKey,
-        stake: null,
       })
 
       setSummary(result)

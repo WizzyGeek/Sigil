@@ -1,5 +1,7 @@
 /** Registry HTTP API client. */
 
+import type { StakeFrame } from '../types/protocol'
+
 const BASE = import.meta.env.VITE_REGISTRY_URL as string
 
 export async function fetchRegistryPublicKey(): Promise<string> {
@@ -43,7 +45,7 @@ export async function requestStake(payload: {
   fingerprint: string
   nonce: string
   signature: string
-}): Promise<{ stake: string }> {
+}): Promise<{ stake: StakeFrame }> {
   const res = await fetch(`${BASE}/stake`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

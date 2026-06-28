@@ -5,4 +5,13 @@ import tailwindcss from '@tailwindcss/vite'
 
 export default defineConfig({
   plugins: [react(), basicSsl(), tailwindcss()],
+  server: {
+    proxy: {
+      '/ws': {
+        target: 'ws://broker:8080',
+        ws: true,
+        rewriteWsOrigin: true,
+      },
+    },
+  },
 })
