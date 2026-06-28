@@ -1,0 +1,82 @@
+@import "tailwindcss";
+
+@theme {
+  --color-gold: #d6b06a;
+  --color-gold-light: #e8cf94;
+  --color-gold-dark: #c79a4f;
+  --font-family-sans: 'Space Grotesk', system-ui, sans-serif;
+  --font-family-mono: 'JetBrains Mono', monospace;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: #000;
+  color: #f4f1ea;
+  overflow: hidden;
+}
+
+.glass {
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+@keyframes sgPulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.3; transform: scale(0.78); }
+}
+
+@keyframes sgFadeUp {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes sgLateFlash {
+  0% { background: rgba(214, 176, 106, 0.14); }
+  100% { background: rgba(255, 255, 255, 0.025); }
+}
+
+@keyframes sgSlideDown {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes sgFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes sgCheckDraw {
+  from { stroke-dashoffset: 52; }
+  to { stroke-dashoffset: 0; }
+}
+
+@keyframes sgGlowPulse {
+  0%, 100% { box-shadow: 0 0 20px rgba(214, 176, 106, 0.2); }
+  50% { box-shadow: 0 0 40px rgba(214, 176, 106, 0.45); }
+}
+
+@keyframes sgStep {
+  from { opacity: 0; transform: translateY(14px); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes sgUp {
+  from { opacity: 0; transform: translateY(20px); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes sgHashFade {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 0.65; }
+}
+
+@keyframes sgFade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}

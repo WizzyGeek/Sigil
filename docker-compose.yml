@@ -1,0 +1,79 @@
+services:
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: sigil
+      POSTGRES_PASSWORD: sigil
+      POSTGRES_DB: sigil
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./registry/src/registry/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sigil -d sigil"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  registry:
+    build:
+      context: ./registry
+      target: dev
+    volumes:
+      - ./registry/src:/app/src
+    ports:
+      - "8000:8000"
+    env_file: ./registry/.env
+    environment:
+      # override localhost from .env → docker service name
+      DATABASE_URL: postgresql://sigil:sigil@postgres:5432/sigil
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >
+          python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/registry/public-key')"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
+  broker:
+    build:
+      context: ./broker
+      target: dev
+    volumes:
+      - ./broker:/app
+      # keep the module cache from the image layer intact
+      - broker_gomod:/go/pkg/mod
+    ports:
+      - "8080:8080"
+    env_file: ./broker/.env
+    environment:
+      # override localhost from .env → docker service name
+      REGISTRY_PUBLIC_KEY_URL: http://registry:8000/registry/public-key
+    depends_on:
+      registry:
+        condition: service_healthy
+
+  client:
+    build:
+      context: ./client
+      target: dev
+    volumes:
+      - ./client/src:/app/src
+      - ./client/index.html:/app/index.html
+      - ./client/tailwind.config.ts:/app/tailwind.config.ts
+      - ./client/vite.config.ts:/app/vite.config.ts
+      - ./client/postcss.config.js:/app/postcss.config.js
+    ports:
+      - "5173:5173"
+    env_file: ./client/.env
+
+volumes:
+  postgres_data:
+  broker_gomod:

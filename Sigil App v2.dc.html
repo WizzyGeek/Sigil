@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    *{box-sizing:border-box;}
+    html,body{margin:0;padding:0;overflow:hidden;background:#000;}
+    ::selection{background:rgba(214,176,106,0.3);}
+    ::-webkit-scrollbar{width:6px;}
+    ::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.09);border-radius:6px;}
+    ::-webkit-scrollbar-track{background:transparent;}
+    input::placeholder,textarea::placeholder{color:rgba(255,255,255,0.25);}
+    input:focus,textarea:focus{outline:none;}
+    @keyframes sgPulse{0%,100%{opacity:1;transform:scale(1);}50%{opacity:0.3;transform:scale(0.78);}}
+    @keyframes sgFadeUp{from{opacity:0;transform:translateY(10px);}to{opacity:1;transform:none;}}
+    @keyframes sgLateFlash{0%{background:rgba(214,176,106,0.14);}100%{background:rgba(255,255,255,0.025);}}
+    @keyframes sgSlideDown{from{opacity:0;transform:translateY(-8px);}to{opacity:1;transform:none;}}
+    @keyframes sgFadeIn{from{opacity:0;}to{opacity:1;}}
+  </style>
+</helmet>
+
+<div style="position:fixed;inset:0;background:radial-gradient(100% 50% at 60% 0%,rgba(214,176,106,0.05),transparent 40%),#000;font-family:'Space Grotesk',system-ui,sans-serif;color:#f4f1ea;">
+
+  <header style="position:absolute;top:0;left:0;right:0;height:58px;z-index:30;display:flex;align-items:center;justify-content:space-between;padding:0 20px 0 16px;background:rgba(0,0,0,0.7);backdrop-filter:blur(12px);border-bottom:1px solid rgba(255,255,255,0.07);">
+    <div style="display:flex;align-items:center;gap:10px;">
+      <div style="width:11px;height:11px;background:linear-gradient(135deg,#e8cf94,#c79a4f);transform:rotate(45deg);border-radius:2px;box-shadow:0 0 10px rgba(214,176,106,0.5);"></div>
+      <span style="font-weight:700;font-size:14px;letter-spacing:3.5px;color:#f4f1ea;">SIGIL</span>
+      <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:rgba(255,255,255,0.28);margin-left:4px;">{{ channelTitle }}</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:16px;">
+      <div style="display:flex;align-items:center;gap:7px;font-family:'JetBrains Mono',monospace;font-size:11px;color:rgba(255,255,255,0.4);">
+        <span style="width:6px;height:6px;border-radius:50%;background:#d6b06a;animation:sgPulse 1.9s ease-in-out infinite;box-shadow:0 0 7px rgba(214,176,106,0.7);"></span>
+        <span>{{ relayCount }} relays</span>
+      </div>
+      <button onClick="{{ toggleSettings }}" title="Settings" style="width:32px;height:32px;display:flex;align-items:center;justify-content:center;border-radius:8px;background:transparent;border:1px solid transparent;cursor:pointer;color:rgba(255,255,255,0.45);transition:all 0.15s;" style-hover="background:rgba(255,255,255,0.06);border-color:rgba(255,255,255,0.1);color:rgba(255,255,255,0.75);">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+      </button>
+    </div>
+  </header>
+
+  <aside style="position:absolute;top:58px;left:0;width:216px;bottom:0;z-index:20;display:flex;flex-direction:column;background:rgba(255,255,255,0.025);border-right:1px solid rgba(255,255,255,0.07);">
+    <div style="padding:16px 14px 8px;">
+      <span style="font-family:'JetBrains Mono',monospace;font-size:10px;color:rgba(255,255,255,0.35);letter-spacing:1.5px;">CHANNELS</span>
+    </div>
+    <div style="flex:1;overflow-y:auto;padding:4px 8px;">
+      <sc-for list="{{ channels }}" as="ch" hint-placeholder-count="5">
+        <button onClick="{{ ch.select }}" style="width:100%;display:flex;align-items:center;justify-content:space-between;padding:9px 10px;border-radius:9px;border:none;cursor:pointer;background:{{ ch.bg }};border-left:{{ ch.borderLeft }};margin-bottom:2px;transition:all 0.15s;" style-hover="background:rgba(255,255,255,0.06);">
+          <div style="display:flex;align-items:center;gap:8px;">
+            <span style="font-size:13px;color:{{ ch.iconColor }};">{{ ch.icon }}</span>
+            <span style="font-family:'JetBrains Mono',monospace;font-size:12.5px;color:{{ ch.color }};font-weight:{{ ch.weight }};">{{ ch.label }}</span>
+          </div>
+          <sc-if value="{{ ch.hasUnread }}" hint-placeholder-val="{{ false }}">
+            <span style="min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:rgba(214,176,106,0.25);font-family:'JetBrains Mono',monospace;font-size:10px;color:rgba(214,176,106,0.9);display:flex;align-items:center;justify-content:center;">{{ ch.unread }}</span>
+          </sc-if>
+        </button>
+      </sc-for>
+    </div>
+    <div style="padding:8px 8px 16px;">
+      <sc-if value="{{ addingChannel }}" hint-placeholder-val="{{ false }}">
+        <input value="{{ newChannelDraft }}" onInput="{{ onNewChannel }}" onKeyDown="{{ onNewChannelKey }}" placeholder="#new-channel" autofocus style="width:100%;height:38px;padding:0 12px;border-radius:9px;background:rgba(255,255,255,0.06);border:1px solid rgba(214,176,106,0.4);color:#f4f1ea;font-family:'JetBrains Mono',monospace;font-size:12.5px;" />
+      </sc-if>
+      <sc-if value="{{ notAddingChannel }}" hint-placeholder-val="{{ true }}">
+        <button onClick="{{ startAddChannel }}" style="width:100%;display:flex;align-items:center;gap:8px;padding:9px 10px;border-radius:9px;border:none;cursor:pointer;background:transparent;color:rgba(255,255,255,0.35);font-family:'JetBrains Mono',monospace;font-size:12px;" style-hover="color:rgba(255,255,255,0.65);">
+          <span style="font-size:16px;line-height:1;">+</span> Add Channel
+        </button>
+      </sc-if>
+    </div>
+  </aside>
+
+  <main ref="{{ scrollRef }}" style="position:absolute;top:58px;left:216px;right:0;bottom:70px;overflow-y:auto;padding:16px 24px 8px;">
+    <sc-for list="{{ visibleNotes }}" as="note" hint-placeholder-count="6">
+      <div style="padding:14px 16px;border-radius:10px;background:{{ note.cardBg }};border:1px solid rgba(255,255,255,0.065);margin-bottom:8px;animation:{{ note.anim }};" style-hover="background:rgba(255,255,255,0.04);">
+        <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:7px;">
+          <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;">
+            <span style="font-weight:700;font-size:14.5px;color:#f6f3ec;">{{ note.name }}</span>
+            <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:rgba(255,255,255,0.35);">{{ note.handle }}</span>
+          </div>
+          <div style="display:flex;gap:3px;flex-shrink:0;margin-left:12px;">
+            <sc-for list="{{ note.locks }}" as="lock" hint-placeholder-count="5">
+              <sc-if value="{{ lock.filled }}" hint-placeholder-val="{{ true }}">
+                <svg width="11" height="11" viewBox="0 0 24 24" style="display:block;"><path d="M7 10V8a5 5 0 0 1 10 0v2" fill="none" stroke="#e3c485" stroke-width="2.4"></path><rect x="4.5" y="10" width="15" height="10.5" rx="2.4" fill="#d6b06a"></rect></svg>
+              </sc-if>
+              <sc-if value="{{ lock.empty }}" hint-placeholder-val="{{ false }}">
+                <svg width="11" height="11" viewBox="0 0 24 24" style="display:block;"><path d="M7 10V8a5 5 0 0 1 10 0v2" fill="none" stroke="rgba(255,255,255,0.14)" stroke-width="2.4"></path><rect x="4.5" y="10" width="15" height="10.5" rx="2.4" fill="none" stroke="rgba(255,255,255,0.11)" stroke-width="1"></rect></svg>
+              </sc-if>
+            </sc-for>
+          </div>
+        </div>
+        <p style="margin:0 0 10px;font-size:14px;line-height:1.55;color:rgba(255,255,255,0.82);">{{ note.content }}</p>
+        <div style="display:flex;align-items:center;gap:8px;font-family:'JetBrains Mono',monospace;font-size:10.5px;color:rgba(255,255,255,0.32);">
+          <span>{{ note.time }}</span>
+          <span style="color:rgba(255,255,255,0.15);">·</span>
+          <span style="color:rgba(214,176,106,0.55);">{{ note.channel }}</span>
+          <sc-if value="{{ note.isLate }}" hint-placeholder-val="{{ false }}">
+            <span style="color:rgba(255,255,255,0.15);">·</span>
+            <span style="color:rgba(255,200,80,0.55);">↑ arrived late</span>
+          </sc-if>
+          <span style="margin-left:auto;cursor:pointer;opacity:0.4;transition:opacity 0.15s;" style-hover="opacity:1;">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"></path></svg>
+          </span>
+        </div>
+      </div>
+    </sc-for>
+  </main>
+
+  <div style="position:absolute;bottom:0;left:216px;right:0;height:70px;z-index:20;display:flex;align-items:center;gap:10px;padding:0 16px;background:rgba(0,0,0,0.7);backdrop-filter:blur(12px);border-top:1px solid rgba(255,255,255,0.07);">
+    <div style="position:relative;">
+      <button onClick="{{ toggleRegistry }}" style="display:flex;align-items:center;gap:7px;height:38px;padding:0 13px;border-radius:10px;border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.04);color:rgba(255,255,255,0.65);font-family:'JetBrains Mono',monospace;font-size:11.5px;cursor:pointer;white-space:nowrap;" style-hover="background:rgba(255,255,255,0.08);">
+        <span style="color:rgba(214,176,106,0.8);">{{ activeRegistry }}</span>
+        <span style="font-size:9px;color:rgba(255,255,255,0.35);">▲</span>
+      </button>
+      <sc-if value="{{ registryOpen }}" hint-placeholder-val="{{ false }}">
+        <div style="position:absolute;bottom:46px;left:0;min-width:220px;padding:6px;border-radius:13px;background:rgba(16,16,16,0.95);backdrop-filter:blur(20px);border:1px solid rgba(255,255,255,0.11);box-shadow:0 16px 44px rgba(0,0,0,0.7);animation:sgSlideDown 0.2s ease both;">
+          <sc-for list="{{ registryOptions }}" as="r" hint-placeholder-count="2">
+            <button onClick="{{ r.pick }}" style="width:100%;display:flex;align-items:center;gap:10px;padding:9px 11px;border-radius:9px;border:none;background:transparent;color:{{ r.color }};font-family:'JetBrains Mono',monospace;font-size:12px;cursor:pointer;text-align:left;" style-hover="background:rgba(255,255,255,0.06);">
+              <span style="width:5px;height:5px;border-radius:50%;background:{{ r.dot }};flex-shrink:0;"></span>
+              {{ r.name }}
+            </button>
+          </sc-for>
+        </div>
+      </sc-if>
+    </div>
+    <input value="{{ draft }}" onInput="{{ onDraft }}" onKeyDown="{{ onKey }}" placeholder="Write a note..." style="flex:1;min-width:0;height:38px;padding:0 14px;border-radius:10px;background:rgba(255,255,255,0.045);border:1px solid rgba(255,255,255,0.09);color:#f4f1ea;font-family:'Space Grotesk',sans-serif;font-size:14px;" />
+    <button onClick="{{ onSend }}" style="height:38px;padding:0 18px;border-radius:10px;border:1px solid rgba(214,176,106,0.5);background:linear-gradient(180deg,rgba(214,176,106,0.2),rgba(214,176,106,0.1));color:#f0dcab;font-family:'JetBrains Mono',monospace;font-size:12px;letter-spacing:0.5px;cursor:pointer;white-space:nowrap;" style-hover="background:rgba(214,176,106,0.28);color:#fbeccb;">SEND →</button>
+  </div>
+
+  <sc-if value="{{ settingsOpen }}" hint-placeholder-val="{{ false }}">
+    <div style="position:absolute;top:66px;right:12px;width:296px;z-index:40;border-radius:16px;background:rgba(14,14,14,0.96);backdrop-filter:blur(24px);border:1px solid rgba(255,255,255,0.11);box-shadow:0 20px 50px rgba(0,0,0,0.7);padding:10px;animation:sgSlideDown 0.2s ease both;">
+      <div style="padding:8px 10px 6px;">
+        <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:rgba(255,255,255,0.35);letter-spacing:1.5px;">IDENTITY</span>
+      </div>
+      <button onClick="{{ rotateKey }}" style="width:100%;display:flex;align-items:center;justify-content:space-between;padding:10px 11px;border-radius:9px;border:none;background:transparent;cursor:pointer;" style-hover="background:rgba(255,255,255,0.055);">
+        <div style="display:flex;align-items:center;gap:10px;color:rgba(255,255,255,0.75);font-size:13.5px;">
+          <span style="font-size:15px;">↻</span> Rotate Key
+        </div>
+        <span style="color:rgba(255,255,255,0.25);font-size:12px;">›</span>
+      </button>
+      <button onClick="{{ revokeKey }}" style="width:100%;display:flex;align-items:center;justify-content:space-between;padding:10px 11px;border-radius:9px;border:none;background:transparent;cursor:pointer;" style-hover="background:rgba(200,50,50,0.1);">
+        <div style="display:flex;align-items:center;gap:10px;color:rgba(240,100,90,0.8);font-size:13.5px;">
+          <span style="font-size:15px;">⚠</span> Revoke Key
+        </div>
+        <span style="color:rgba(240,100,90,0.4);font-size:12px;">›</span>
+      </button>
+
+      <div style="height:1px;background:rgba(255,255,255,0.07);margin:8px 0;"></div>
+      <div style="padding:8px 10px 6px;">
+        <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:rgba(255,255,255,0.35);letter-spacing:1.5px;">STAKE PROVIDER</span>
+        <p style="margin:4px 0 0;font-family:'JetBrains Mono',monospace;font-size:10.5px;color:rgba(255,255,255,0.3);">Registry that endorses your next note</p>
+      </div>
+      <sc-for list="{{ settingsRegistries }}" as="sr" hint-placeholder-count="2">
+        <button onClick="{{ sr.pick }}" style="width:100%;display:flex;align-items:center;gap:10px;padding:10px 11px;border-radius:9px;border:none;background:transparent;cursor:pointer;" style-hover="background:rgba(255,255,255,0.055);">
+          <span style="width:8px;height:8px;border-radius:50%;border:1.5px solid {{ sr.dot }};background:{{ sr.dotFill }};flex-shrink:0;"></span>
+          <span style="flex:1;text-align:left;font-family:'JetBrains Mono',monospace;font-size:12px;color:{{ sr.color }};">{{ sr.name }}</span>
+          <span style="width:6px;height:6px;border-radius:50%;background:rgba(100,210,130,0.8);flex-shrink:0;"></span>
+        </button>
+      </sc-for>
+      <button onClick="{{ openAddRegistry }}" style="width:100%;display:flex;align-items:center;gap:9px;padding:9px 11px;border-radius:9px;border:none;background:transparent;cursor:pointer;color:rgba(255,255,255,0.4);font-family:'JetBrains Mono',monospace;font-size:12px;" style-hover="background:rgba(255,255,255,0.055);color:rgba(255,255,255,0.7);">
+        <span style="font-size:16px;line-height:1;">+</span> Add Registry
+      </button>
+
+      <div style="height:1px;background:rgba(255,255,255,0.07);margin:8px 0;"></div>
+      <div style="padding:8px 10px 6px;">
+        <span style="font-family:'JetBrains Mono',monospace;font-size:9.5px;color:rgba(255,255,255,0.35);letter-spacing:1.5px;">BROKERS</span>
+      </div>
+      <sc-for list="{{ brokers }}" as="b" hint-placeholder-count="2">
+        <div style="display:flex;align-items:center;gap:10px;padding:9px 11px;border-radius:9px;">
+          <span style="width:6px;height:6px;border-radius:50%;background:{{ b.dot }};flex-shrink:0;box-shadow:0 0 5px {{ b.dot }};"></span>
+          <span style="flex:1;font-family:'JetBrains Mono',monospace;font-size:11.5px;color:rgba(255,255,255,0.65);">{{ b.url }}</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:11px;color:rgba(255,255,255,0.35);">{{ b.latency }}</span>
+        </div>
+      </sc-for>
+      <button style="width:100%;display:flex;align-items:center;gap:9px;padding:9px 11px;border-radius:9px;border:none;background:transparent;cursor:pointer;color:rgba(255,255,255,0.4);font-family:'JetBrains Mono',monospace;font-size:12px;" style-hover="background:rgba(255,255,255,0.055);color:rgba(255,255,255,0.7);">
+        <span style="font-size:16px;line-height:1;">+</span> Add Broker
+      </button>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ modalOpen }}" hint-placeholder-val="{{ false }}">
+    <div onClick="{{ closeModal }}" style="position:fixed;inset:0;z-index:50;background:rgba(0,0,0,0.72);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;animation:sgFadeIn 0.2s ease both;">
+      <div onClick="{{ stopProp }}" style="width:100%;max-width:480px;margin:24px;padding:28px 28px 26px;border-radius:20px;background:rgba(14,14,14,0.97);border:1px solid rgba(255,255,255,0.1);box-shadow:0 30px 80px rgba(0,0,0,0.8);">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;">
+          <h2 style="margin:0;font-weight:700;font-size:20px;color:#f6f3ec;">Add Registry</h2>
+          <button onClick="{{ closeModal }}" style="width:28px;height:28px;display:flex;align-items:center;justify-content:center;border-radius:7px;border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.04);cursor:pointer;color:rgba(255,255,255,0.5);font-size:16px;" style-hover="background:rgba(255,255,255,0.09);">×</button>
+        </div>
+        <p style="margin:0 0 24px;font-size:13px;line-height:1.6;color:rgba(255,255,255,0.5);">Registries are identity providers. Your same keypair can be registered on multiple registries with different handles.</p>
+
+        <div style="margin-bottom:18px;">
+          <label style="display:block;font-family:'JetBrains Mono',monospace;font-size:10.5px;color:rgba(255,255,255,0.4);letter-spacing:0.8px;margin-bottom:8px;">REGISTRY URL</label>
+          <div style="display:flex;gap:8px;">
+            <input value="{{ arUrl }}" onInput="{{ onArUrl }}" placeholder="https://" style="flex:1;height:42px;padding:0 13px;border-radius:10px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.12);color:#f4f1ea;font-family:'JetBrains Mono',monospace;font-size:12.5px;" />
+            <button onClick="{{ arConnect }}" style="height:42px;padding:0 16px;border-radius:10px;border:1px solid rgba(214,176,106,0.5);background:rgba(214,176,106,0.1);color:#f0dcab;font-family:'JetBrains Mono',monospace;font-size:12px;cursor:pointer;" style-hover="background:rgba(214,176,106,0.2);">{{ arConnectLabel }}</button>
+          </div>
+          <sc-if value="{{ arOk }}" hint-placeholder-val="{{ false }}">
+            <div style="margin-top:7px;font-family:'JetBrains Mono',monospace;font-size:11px;color:rgba(100,210,130,0.9);">✓ Registry reachable</div>
+          </sc-if>
+          <sc-if value="{{ arErr }}" hint-placeholder-val="{{ false }}">
+            <div style="margin-top:7px;font-family:'JetBrains Mono',monospace;font-size:11px;color:rgba(240,100,90,0.85);">Could not reach this registry</div>
+          </sc-if>
+        </div>
+
+        <div style="margin-bottom:18px;opacity:{{ arStep2Opacity }};pointer-events:{{ arStep2Pointer }};">
+          <label style="display:block;font-family:'JetBrains Mono',monospace;font-size:10.5px;color:rgba(255,255,255,0.4);letter-spacing:0.8px;margin-bottom:8px;">CHOOSE YOUR HANDLE</label>
+          <div style="display:flex;align-items:center;border-radius:10px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.12);overflow:hidden;">
+            <span style="padding:0 11px;height:42px;display:flex;align-items:center;font-family:'JetBrains Mono',monospace;font-size:13px;color:rgba(255,255,255,0.35);border-right:1px solid rgba(255,255,255,0.09);">@</span>
+            <input value="{{ arHandle }}" onInput="{{ onArHandle }}" placeholder="yourhandle" style="flex:1;height:42px;padding:0 13px;background:transparent;border:none;color:#f4f1ea;font-family:'JetBrains Mono',monospace;font-size:12.5px;" />
+            <sc-if value="{{ arHandleOk }}" hint-placeholder-val="{{ false }}">
+              <span style="padding:0 12px;font-family:'JetBrains Mono',monospace;font-size:11px;color:rgba(100,210,130,0.9);">Available ✓</span>
+            </sc-if>
+            <sc-if value="{{ arHandleTaken }}" hint-placeholder-val="{{ false }}">
+              <span style="padding:0 12px;font-family:'JetBrains Mono',monospace;font-size:11px;color:rgba(240,180,60,0.9);">Taken</span>
+            </sc-if>
+            <sc-if value="{{ arHandleChecking }}" hint-placeholder-val="{{ false }}">
+              <span style="padding:0 12px;font-family:'JetBrains Mono',monospace;font-size:11px;color:rgba(255,255,255,0.35);">Checking...</span>
+            </sc-if>
+          </div>
+          <p style="margin:7px 0 0;font-family:'JetBrains Mono',monospace;font-size:10.5px;color:rgba(255,255,255,0.3);">Your handle on this registry. Can differ from other handles.</p>
+        </div>
+
+        <div style="opacity:{{ arStep3Opacity }};pointer-events:{{ arStep3Pointer }};">
+          <button onClick="{{ arRegister }}" style="width:100%;height:46px;display:flex;align-items:center;justify-content:center;gap:10px;border-radius:12px;border:1px solid rgba(214,176,106,0.55);background:linear-gradient(180deg,rgba(214,176,106,0.22),rgba(214,176,106,0.1));color:#f7e6bd;font-family:'JetBrains Mono',monospace;font-size:13px;letter-spacing:0.8px;cursor:pointer;" style-hover="background:rgba(214,176,106,0.3);">
+            {{ arRegisterLabel }} →
+          </button>
+          <sc-if value="{{ arRegErr }}" hint-placeholder-val="{{ false }}">
+            <div style="margin-top:8px;font-family:'JetBrains Mono',monospace;font-size:11px;color:rgba(240,100,90,0.85);">{{ arRegErrMsg }}</div>
+          </sc-if>
+        </div>
+      </div>
+    </div>
+  </sc-if>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+class Component extends DCLogic {
+  scrollRef = React.createRef();
+  _nextId = 100;
+  _handleTimer = null;
+
+  SEED = [
+    { name:'Maren Vesper', handle:'@vesper@registry.example.com', fresh:5, channel:'#general', time:'13:44', content:'Signed the genesis entry of my notebook today. Everything appended from here is mine, verifiable, and impossible to forge.' },
+    { name:'cold_archive', handle:'@cold@vault.example.com', fresh:4, channel:'#crypto', time:'13:47', content:'Key rotation complete. Old shards burned. If you trusted my previous fingerprint, re-pin the new one.' },
+    { name:'Iris Holloway', handle:'@iris@registry.example.com', fresh:5, channel:'#general', time:'13:50', content:'The nice thing about a protocol with no server is that there is no one to ask permission from.' },
+    { name:'nullroute', handle:'@nullroute@relay.example.com', fresh:2, channel:'#dev', time:'13:52', content:'Stale freshness on this one — relays lagging behind in the east cluster. Re-broadcasting.' },
+    { name:'Teodor Lim', handle:'@teo@registry.example.com', fresh:5, channel:'#signal', time:'13:55', content:'Three independent relays confirmed this note within 40ms. Consensus feels good when it is this quiet.' },
+    { name:'Saskia Vance', handle:'@saskia@orbit.example.com', fresh:3, channel:'#general', time:'13:58', content:'Reading old notes from people who have since rotated away. The signatures still hold. The words still hold.' },
+    { name:'mesh.daemon', handle:'@mesh@registry.example.com', fresh:4, channel:'#dev', time:'14:01', content:'Pushed v0.9 of the gossip layer. Latency down 22%. Notes now propagate to the full mesh in under a second.' },
+    { name:'Orla Bennet', handle:'@orla@registry.example.com', fresh:5, channel:'#crypto', time:'14:04', content:'Encrypted the channel. Only the four of us hold the symmetric key. Everyone else sees ciphertext.' },
+    { name:'glyph', handle:'@glyph@registry.example.com', fresh:4, channel:'#general', time:'14:06', content:'A note is just a claim plus a signature plus a clock. Everything else is interface.' },
+  ];
+
+  STREAM = [
+    { name:'Wren Ashby', handle:'@wren@registry.example.com', fresh:5, channel:'#general', content:'Just joined the mesh. Pinned my key. Hello to whoever is listening.' },
+    { name:'static_field', handle:'@static@relay.example.com', fresh:3, channel:'#signal', content:'Picking up partial freshness from a node that keeps dropping. North cluster needs to resync.' },
+    { name:'Dario Voss', handle:'@dario@registry.example.com', fresh:5, channel:'#crypto', content:'Multi-sig note: required three of five signatures before broadcast. All five signed anyway. Good morning.' },
+    { name:'lantern', handle:'@lantern@vault.example.com', fresh:4, channel:'#general', content:'Reminder: freshness is not trust. A five-lock note can still be wrong. Verify the author, not the clock.', late:true },
+    { name:'Petra Nilsson', handle:'@petra@registry.example.com', fresh:5, channel:'#dev', content:'Shipped offline-first sync. Write notes on a plane, they reconcile the moment you touch a relay.' },
+    { name:'ghostwire', handle:'@ghostwire@orbit.example.com', fresh:2, channel:'#signal', content:'Testing degraded mode on purpose. The grid stays readable even when half the relays go dark.' },
+    { name:'Aurelia Kade', handle:'@aurelia@registry.example.com', fresh:5, channel:'#general', content:'No algorithm decides what you see here. Just the notes, in the order the network agreed they arrived.' },
+  ];
+
+  state = {
+    notes: [],
+    selectedChannel: 'general',
+    unread: { crypto:0, dev:0, signal:0 },
+    extraChannels: [],
+    addingChannel: false,
+    newChannelDraft: '',
+    draft: '',
+    selectedRegistry: '@alice · registry.sigil.local',
+    registries: ['@alice · registry.sigil.local', '@ali · orbit.example.com'],
+    registryOpen: false,
+    settingsOpen: false,
+    modalOpen: false,
+    relayCount: '1,284',
+    arUrl: '', arStatus: 'idle', arHandle: '', arHandleStatus: 'idle',
+    arRegStatus: 'idle', arRegErrMsg: '',
+  };
+
+  componentDidMount() {
+    const seeded = this.SEED.map((n,i) => ({ ...n, id:'s'+i, late:false }));
+    this.setState({ notes: seeded });
+    let qi = 0;
+    this._timer = setInterval(() => {
+      if (qi >= this.STREAM.length) { clearInterval(this._timer); return; }
+      const src = this.STREAM[qi++];
+      const note = { ...src, id:'n'+(this._nextId++), time:this.clock(), late:!!src.late };
+      this.setState(s => {
+        const ch = src.channel.replace('#','');
+        const unread = s.selectedChannel !== ch && ch !== 'general'
+          ? { ...s.unread, [ch]: (s.unread[ch]||0)+1 }
+          : s.unread;
+        return { notes:[...s.notes, note], unread, relayCount:this.bump(s.relayCount) };
+      }, () => {
+        const el = this.scrollRef.current;
+        if (el && src.channel.replace('#','') === this.state.selectedChannel) {
+          el.scrollTo({ top: el.scrollHeight, behavior:'smooth' });
+        }
+      });
+    }, 3800);
+    this._onDoc = () => this.setState({ settingsOpen:false, registryOpen:false });
+    document.addEventListener('click', this._onDoc);
+  }
+
+  componentWillUnmount() {
+    clearInterval(this._timer);
+    clearTimeout(this._handleTimer);
+    document.removeEventListener('click', this._onDoc);
+  }
+
+  clock() {
+    const d = new Date();
+    return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');
+  }
+  bump(s) { return (parseInt(s.replace(/,/g,''),10)+Math.floor(Math.random()*4)+1).toLocaleString('en-US'); }
+  locks(n) { return [0,1,2,3,4].map(i=>({filled:i<n,empty:i>=n})); }
+
+  send = () => {
+    const text = this.state.draft.trim();
+    if (!text) return;
+    const note = { id:'n'+(this._nextId++), name:'you', handle:'@you@sigil.local', fresh:5, channel:'#'+this.state.selectedChannel, time:this.clock(), content:text, late:false };
+    this.setState(s => ({ notes:[...s.notes,note], draft:'' }), () => {
+      const el = this.scrollRef.current;
+      if (el) el.scrollTo({ top:el.scrollHeight, behavior:'smooth' });
+    });
+  };
+
+  renderVals() {
+    const { selectedChannel, unread, addingChannel, draft, selectedRegistry, registries, registryOpen, settingsOpen, modalOpen, relayCount, arUrl, arStatus, arHandle, arHandleStatus, arRegStatus, arRegErrMsg } = this.state;
+    const BASE_CHANNELS = ['general','crypto','dev','signal'];
+    const allChannels = [...BASE_CHANNELS, ...this.state.extraChannels];
+
+    const channels = allChannels.map(c => {
+      const active = c === selectedChannel;
+      const u = unread[c] || 0;
+      return {
+        label: c === 'general' ? 'general' : '#'+c,
+        icon: c === 'general' ? '★' : '#',
+        iconColor: c === 'general' ? (active ? '#e3c485' : 'rgba(214,176,106,0.5)') : (active ? 'rgba(255,255,255,0.7)' : 'rgba(255,255,255,0.3)'),
+        bg: active ? 'rgba(214,176,106,0.1)' : 'transparent',
+        borderLeft: active ? '3px solid rgba(214,176,106,0.7)' : '3px solid transparent',
+        color: active ? '#f0dcab' : 'rgba(255,255,255,0.65)',
+        weight: active ? '600' : '400',
+        hasUnread: u > 0,
+        unread: String(u),
+        select: (e) => { e && e.stopPropagation(); this.setState(s => ({ selectedChannel:c, unread:{...s.unread,[c]:0} })); },
+      };
+    });
+
+    const visibleNotes = this.state.notes
+      .filter(n => selectedChannel === 'general' || n.channel === '#'+selectedChannel)
+      .map(n => ({
+        ...n,
+        locks: this.locks(n.fresh),
+        cardBg: n.late ? 'rgba(214,176,106,0.07)' : 'rgba(255,255,255,0.025)',
+        anim: n.late ? 'sgLateFlash 2s ease-out forwards, sgFadeUp 0.4s ease both' : 'sgFadeUp 0.4s ease both',
+        isLate: n.late,
+      }));
+
+    const registryOptions = registries.map(r => ({
+      name: r, pick: (e) => { e&&e.stopPropagation(); this.setState({selectedRegistry:r, registryOpen:false}); },
+      color: r === selectedRegistry ? '#f0dcab' : 'rgba(255,255,255,0.65)',
+      dot: r === selectedRegistry ? '#e3c485' : 'rgba(255,255,255,0.3)',
+    }));
+
+    const settingsRegistries = registries.map(r => ({
+      name: r, pick: (e) => { e&&e.stopPropagation(); this.setState({selectedRegistry:r}); },
+      color: r === selectedRegistry ? '#f0dcab' : 'rgba(255,255,255,0.65)',
+      dot: r === selectedRegistry ? '#e3c485' : 'rgba(255,255,255,0.25)',
+      dotFill: r === selectedRegistry ? 'rgba(214,176,106,0.4)' : 'transparent',
+    }));
+
+    const arOk = arStatus === 'success', arErr = arStatus === 'error';
+    const arHandleOk = arHandleStatus === 'available', arHandleTaken = arHandleStatus === 'taken', arHandleChecking = arHandleStatus === 'checking';
+    const arStep2Opacity = arOk ? '1' : '0.3', arStep2Pointer = arOk ? 'auto' : 'none';
+    const arStep3Opacity = arHandleOk ? '1' : '0.3', arStep3Pointer = arHandleOk ? 'auto' : 'none';
+
+    const brokers = [
+      { url:'relay.sigil.local', latency:'12ms', dot:'rgba(100,210,130,0.85)' },
+      { url:'broker.orbit.example.com', latency:'38ms', dot:'rgba(100,210,130,0.85)' },
+    ];
+
+    return {
+      channels, visibleNotes, registryOptions, settingsRegistries, brokers,
+      relayCount, channelTitle: selectedChannel === 'general' ? '★ general' : '#'+selectedChannel,
+      draft, activeRegistry: selectedRegistry, registryOpen, settingsOpen, modalOpen,
+      addingChannel, notAddingChannel: !addingChannel, newChannelDraft: this.state.newChannelDraft,
+      scrollRef: this.scrollRef,
+      arUrl, arOk, arErr, arHandle, arHandleOk, arHandleTaken, arHandleChecking,
+      arStep2Opacity, arStep2Pointer, arStep3Opacity, arStep3Pointer,
+      arConnectLabel: arStatus === 'loading' ? '...' : 'CONNECT',
+      arRegisterLabel: arRegStatus === 'loading' ? 'Registering...' : 'REGISTER ON THIS REGISTRY',
+      arRegErr: arRegStatus === 'error', arRegErrMsg,
+      onDraft: (e) => this.setState({ draft:e.target.value }),
+      onKey: (e) => { if(e.key==='Enter'){e.preventDefault();this.send();} },
+      onSend: this.send,
+      toggleSettings: (e) => { e.stopPropagation(); this.setState(s=>({settingsOpen:!s.settingsOpen,registryOpen:false})); },
+      toggleRegistry: (e) => { e.stopPropagation(); this.setState(s=>({registryOpen:!s.registryOpen,settingsOpen:false})); },
+      startAddChannel: () => this.setState({addingChannel:true,newChannelDraft:''}),
+      onNewChannel: (e) => this.setState({newChannelDraft:e.target.value}),
+      onNewChannelKey: (e) => {
+        if(e.key==='Enter'){
+          const v = this.state.newChannelDraft.trim().replace(/^#/,'').replace(/\s+/g,'-').toLowerCase();
+          if(v) this.setState(s=>({extraChannels:[...s.extraChannels,v],addingChannel:false,selectedChannel:v}));
+        }
+        if(e.key==='Escape') this.setState({addingChannel:false});
+      },
+      openAddRegistry: (e) => { e&&e.stopPropagation(); this.setState({modalOpen:true,settingsOpen:false,arUrl:'',arStatus:'idle',arHandle:'',arHandleStatus:'idle',arRegStatus:'idle'}); },
+      closeModal: () => this.setState({modalOpen:false}),
+      stopProp: (e) => e.stopPropagation(),
+      rotateKey: (e) => { e&&e.stopPropagation(); },
+      revokeKey: (e) => { e&&e.stopPropagation(); },
+      onArUrl: (e) => this.setState({arUrl:e.target.value, arStatus:'idle'}),
+      arConnect: (e) => {
+        e&&e.stopPropagation();
+        this.setState({arStatus:'loading'});
+        setTimeout(()=>this.setState({arStatus:this.state.arUrl.length>4?'success':'error'}),900);
+      },
+      onArHandle: (e) => {
+        const v = e.target.value.replace(/[^a-z0-9_]/g,'');
+        this.setState({arHandle:v,arHandleStatus:v.length>0?'checking':'idle'});
+        clearTimeout(this._handleTimer);
+        if(v.length>1) this._handleTimer = setTimeout(()=>this.setState({arHandleStatus:v==='alice'?'taken':'available'}),600);
+      },
+      arRegister: (e) => {
+        e&&e.stopPropagation();
+        this.setState({arRegStatus:'loading'});
+        setTimeout(()=>this.setState(s=>({
+          arRegStatus:'idle', modalOpen:false,
+          registries:[...s.registries, `@${s.arHandle}@${s.arUrl}`],
+          selectedRegistry:`@${s.arHandle}@${s.arUrl}`,
+        })),1200);
+      },
+    };
+  }
+}
+</script>
+</body>
+</html>

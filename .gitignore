@@ -1,0 +1,23 @@
+# Client
+client/node_modules/
+client/dist/
+client/.env
+
+# Registry
+registry/.venv/
+registry/src/**/__pycache__/
+registry/**/__pycache__/
+registry/.env
+*.pyc
+*.pyo
+
+# Broker
+broker/bin/
+broker/.env
+
+# Shared
+.env
+*.log
+.DS_Store
+.idea/
+.vscode/
