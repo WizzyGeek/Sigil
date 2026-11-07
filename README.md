@@ -199,12 +199,12 @@ Step 1 — Parse
   Extract [outer_payload, outer_sig] from the frame
   Extract stake = outer_payload.stake = [stake_payload, stake_sig]
 
-Step 2 — Verify stake (inner JWT)
+Step 2 — Verify registry-signed stake frame
   Verify stake_sig using the registry public key (baked into the client at build time)
   If this fails → DROP. Stop.
   Extract: public_key, user_tag, display_name, iat from verified stake_payload
 
-Step 3 — Verify outer JWT
+Step 3 — Verify author-signed outer frame
   Verify outer_sig using public_key from the verified stake
   If this fails → DROP. Stop.
 
@@ -225,22 +225,19 @@ A note that passes all four steps is proven to have been:
 
 ### Requesting History
 
-When a client connects, it may not find any notes on the broker because brokers store nothing. The `request_notes` mechanism lets clients ask peers for their stored notes.
+Brokers store no notes. A client subscribes to its joined channels and automatically requests history for the active channel after connecting, reconnecting, or switching channels. **Refresh history** restarts the exchange manually.
 
-1. Client sends a `request_notes` UNT to its channel
-2. Broker fans out to all subscribers
-3. Each subscriber independently decides whether to respond using a deterministic hash:
+1. The requester sends a fresh, signed `request_notes` with a snapshot boundary `till`. The initial boundary includes notes from the current second.
+2. Every connected peer in that channel can respond, including a sole peer. There is no random sampling that can leave a request unanswered.
+3. Each peer reads a page from its local IndexedDB, verifies the original notes, and sends a signed `note_relay`. The reply contains `to` (requester fingerprint), `request_jti` (the original request), and `peer_id` (the responder's session ID).
+4. The broker uses the request JTI to route the response to the exact requesting connection, including when several tabs/devices share a fingerprint. This correlation metadata shares the bounded broadcast JTI cache and expires after five minutes; it stores no notes.
+5. The requester checks the envelope, recipient, outstanding request, channel, issuer-specific signatures, and each original note. Individual originals that fail verification or use an untrusted registry are skipped, counted in the UI, and never saved; the authenticated page cursor still permits fetching older trusted notes. An atomic IndexedDB transaction saves each JTI once, even when live traffic and several peers supply it concurrently.
+6. Replies include `has_more` and `next_cursor: {iat, jti}`. The requester pages each responding session independently, sending fresh request JTIs and targeting that peer's fingerprint and `peer_id`. The compound cursor prevents losing notes sharing a timestamp and prevents one peer's cursor from skipping another peer's history.
+7. Pages respect both the configured batch count and the serialized frame byte limit. Fresh relay envelopes can carry original notes older than the broker's five-minute broadcast cutoff. Empty replies acknowledge a peer with no matching notes.
 
-   ```
-   hash = SHA-256(request_jti_bytes || own_fingerprint_bytes)
-   respond if hash[0] < 0x40   // ~25% probability → log(N) responders
-   ```
+Requests that receive no reply retry up to three times, always with a **new JTI** so broker deduplication does not swallow retries. The default reply/peer-discovery window is five seconds per attempt. The UI reports progress, peer counts, missing peers, or incomplete transfers. Reconnecting restarts synchronization, and **Refresh history** retries a partial transfer without duplicating stored notes.
 
-4. Responding peers send a `note_relay` UNT containing up to `MAX_RELAY_BATCH` stored notes
-5. The `note_relay.to` field contains the requester's fingerprint
-6. Broker routes the relay to the correct connection via its in-memory fingerprint index
-
-This gives history availability proportional to the number of connected peers, without any central note storage.
+History is limited to what connected peers retain and which registry keys the requester trusts. Offline peers cannot supply data; peers using the previous one-page protocol need the updated client. No centralized archive or listener is required. IndexedDB version 2 adds a history pagination index while preserving version-1 notes; other open tabs running old code may need a reload to allow the database upgrade.
 
 ---
 
@@ -256,7 +253,7 @@ All frames — including control frames — are UNTs. The `type` field in the ou
 | `request_notes` | client → broker → peers | Request stored notes from peers |
 | `note_relay` | peer → broker → requester | Response to a request_notes |
 
-**Channels** are plain strings (e.g. `"news,tech"`). They are broker-local, implicit (no registration needed), and matched by exact string equality. The default channel is `"*"`.
+**Channels** are plain strings (e.g. `"news,tech"`). They are broker-local, implicit (no registration needed), and matched by exact string equality. There is no special wildcard subscription. The client suggests `VITE_DEFAULT_CHANNELS` when configured; otherwise users join channels explicitly.
 
 ---
 
@@ -406,16 +403,16 @@ Services:
 
 | Service  | URL                          |
 |----------|------------------------------|
-| Client   | http://localhost:5173        |
+| Client   | https://localhost:5173        |
 | Registry | http://localhost:8000        |
 | Broker   | ws://localhost:8080/ws       |
 | Postgres | localhost:5432               |
 
-Hot-reload is enabled for all services in development mode. Editing any source file restarts the relevant service automatically.
+The client and registry reload source changes in development. The broker runs with `go run` and needs `docker compose restart broker` after Go changes. The client uses a self-signed development HTTPS certificate. To rebuild and recreate the full stack without deleting its database volume, run `docker compose up -d --build --force-recreate`.
 
 ### Without Docker
 
-Requires: Python 3.11+, Go 1.22+, Node.js 20+, PostgreSQL 15+
+Requires: Python 3.11+, Go 1.21+, Node.js 22.15+ or Node.js 24+, PostgreSQL 15+
 
 ```bash
 # Postgres — create database
@@ -425,10 +422,11 @@ psql sigil < registry/src/registry/schema.sql
 # Registry
 cd registry
 python -m venv .venv && .venv/bin/pip install -r requirements.txt
-PYTHONPATH=src .venv/bin/uvicorn registry.main:app --reload --port 8000
+PYTHONPATH=src .venv/bin/uvicorn registry.main:app --reload --port 8000 --no-proxy-headers
 
 # Broker (separate terminal)
 cd broker
+set -a; . ./.env; set +a
 go run ./cmd/broker
 
 # Client (separate terminal)
@@ -440,6 +438,8 @@ npm install && npm run dev
 
 ## Configuration Reference
 
+Copy the per-service `.env.example` files as shown above. The root `.env.example` is a consolidated reference. The registry and Vite load their service `.env` files; the native Go broker reads process environment variables, so source `broker/.env` or use the Procfile. Compose loads each service file and provides internal Docker routing overrides.
+
 ### Registry (`registry/.env`)
 
 | Variable | Required | Default | Description |
@@ -447,30 +447,57 @@ npm install && npm run dev
 | `DATABASE_URL` | yes | `postgresql://sigil:sigil@localhost:5432/sigil` | PostgreSQL connection string |
 | `REGISTRY_PRIVATE_KEY_PEM` | yes | — | RSA-4096 private key, newlines as `\n` |
 | `REGISTRY_PUBLIC_KEY_PEM` | yes | — | Corresponding public key, newlines as `\n` |
-| `REGISTRY_DOMAIN` | yes | `localhost:8000` | Public domain (no scheme), embedded in stakes |
-| `EMAIL_SMTP_HOST` | no | — | SMTP host for email OTP (key-recovery path B) |
+| `REGISTRY_DOMAIN` | no | — | Fallback registry domain for calls without a request host. A direct or trusted proxy host always takes precedence. |
+| `FORWARDED_ALLOW_IPS` | no | `127.0.0.1,::1` | Trusted reverse-proxy IPs or CIDRs. Forwarded public host and protocol are accepted only from these peers. `*` is suitable only when the registry is reachable exclusively through a trusted proxy. |
+| `EMAIL_SMTP_HOST` | no | — | Reserved for email delivery; not implemented yet |
 | `EMAIL_SMTP_PORT` | no | `587` | SMTP port |
-| `EMAIL_SMTP_USER` | no | — | SMTP username |
-| `EMAIL_SMTP_PASS` | no | — | SMTP password |
-| `EMAIL_FROM_ADDRESS` | no | — | From address for OTP emails |
+| `EMAIL_SMTP_USER` | no | — | Reserved SMTP username |
+| `EMAIL_SMTP_PASS` | no | — | Reserved SMTP password |
+| `EMAIL_FROM_ADDRESS` | no | — | Reserved sender address |
 
 ### Broker (`broker/.env`)
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `REGISTRY_PUBLIC_KEY_URL` | yes | — | URL to fetch the registry's public key from |
+| `REGISTRY_PUBLIC_KEY_URL` | no | — | Optional key endpoint mapping for that URL’s host. Fetched lazily when its issuer is seen. |
+| `REGISTRY_KEY_URLS` | no | `{}` | JSON map from issuer (`host[:port]`) to an explicit key endpoint; supports local/private registries and Docker service addresses. |
+| `REGISTRY_KEY_TTL_SECONDS` | no | `300` | Lifetime of successfully fetched registry keys before the next UNT triggers a refresh. |
 | `BROKER_PORT` | no | `8080` | Port to listen on |
 | `MIN_FRESHNESS_SCORE` | no | `1` | Drop UNTs with freshness score below this (0–5) |
 | `MAX_FRAME_BYTES` | no | `262144` | Max WebSocket frame size in bytes (256 KB) |
 | `MAX_CONTENT_BYTES` | no | `4096` | Max note content length in bytes |
 | `MAX_RELAY_BATCH` | no | `25` | Max notes allowed in a single `note_relay` frame |
 
+The broker discovers each UNT’s stake issuer and fetches `https://<issuer>/registry/public-key`. It verifies the stake with that issuer’s key, then the outer frame with the endorsed author key, before routing. Failed lookup or validation drops the frame. Public discovery requires valid TLS certificates, disallows redirects, and refuses private/internal network destinations. Explicit endpoint mappings are available for local development.
+
+The registry cache holds up to **10,000** records, including unsuccessful lookups. A missing issuer whose fetch fails gets a **55-second** retry delay. A failed refresh of an expired record uses **1.5 × its previous TTR**. Cached failures suppress network retries until expiry; expired keys are never used. Successful fetches reset the lifetime to `REGISTRY_KEY_TTL_SECONDS` (default five minutes). Expired records retain retry history until refreshed or evicted. When full, the earliest-expiring record is evicted only if it expires strictly before the new record; otherwise the fetched result is used for the current frame without being cached. Concurrent lookups for one issuer share a fetch, and slow registries do not block the central routing loop.
+
+For verified `note` and `request_notes` broadcasts, the broker drops frames older than **five minutes** before accessing the JTI cache. Recent frames share a **global, 100,000-entry LRU JTI cache** across both message types, channels, and authors. A duplicate refreshes its recency but is never forwarded again while cached. At capacity, eviction removes the least recently observed JTI. Alternating two recent JTIs cannot cycle them through a slot formerly protected by hot frequency counts; both remain cached and are dropped. Invalid signatures, missing JTIs, stale frames, and oversized note content cannot reserve cache entries. Other control types and history relay contents do not use this broadcast deduplication cache.
+
 ### Client (`client/.env`)
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `VITE_REGISTRY_URL` | yes | Base URL of the registry (e.g. `http://localhost:8000`) |
-| `VITE_DEFAULT_BROKER_URL` | yes | Default broker WebSocket URL (e.g. `ws://localhost:8080/ws`) |
+| `VITE_REGISTRY_URL` | no | Suggested HTTPS registry URL (HTTP is allowed only on loopback for development), pre-filled and editable during onboarding (e.g. `http://localhost:8000`). If unset, the field starts empty. |
+| `VITE_DEFAULT_BROKER_URL` | no | Suggested broker WebSocket URL (`ws://`, `wss://`, or same-origin `/ws`). Editable in Settings and saved per identity. If unset, connect a broker in Settings. |
+| `VITE_DEFAULT_CHANNELS` | no | Comma-separated suggested channels for a new identity. If unset, join a channel using Add Channel. |
+| `VITE_MAX_NOTE_BYTES` | no | Composer UTF-8 byte limit (default `4096`); match the broker’s `MAX_CONTENT_BYTES`. |
+| `VITE_MAX_FRAME_BYTES` | no | Serialized history relay frame limit (default `262144`, minimum `1024`); match the broker’s `MAX_FRAME_BYTES`. |
+| `VITE_HISTORY_BATCH_SIZE` | no | Original notes per relay page (default `25`, range `1..25`; larger values cap at `25`); must not exceed the broker’s `MAX_RELAY_BATCH`. |
+| `VITE_HISTORY_TIMEOUT_MS` | no | Reply collection / retry timeout in milliseconds (default `5000`, range `500..60000`); a silent request makes up to three attempts. |
+| `VITE_REGISTRY_TIMEOUT_MS` | no | Registry HTTP request deadline in milliseconds (default `10000`, range `500..120000`), including reading the response body. Timeout errors are shown with a retry action. |
+| `VITE_REPOSITORY_URL` | no | Repository URL for landing-page source and setup links. Those links are hidden when unset. |
+| `DEV_BROKER_PROXY_URL` | no | Vite development proxy target for `/ws` (e.g. `ws://localhost:8080`). Required only when using the development proxy. |
+
+Handles and signed stake issuers use the public registry request host, including its port when present. A proxy can preserve `Host` or supply `X-Forwarded-Host` / `Forwarded: host=...`; configure its IP or network in `FORWARDED_ALLOW_IPS`. It must overwrite untrusted forwarding headers before passing requests on. For chained host values, the last value supplied by the immediate trusted proxy is used. The browser’s `Origin` header identifies the client website and is never used as the registry identity. `REGISTRY_DOMAIN` is used only when no request host is available (including calls without an HTTP request). It never overrides a direct or trusted forwarded host. Calls with neither a host nor a configured fallback fail explicitly instead of assuming localhost.
+
+Start Uvicorn with `--no-proxy-headers` (already configured in Docker and the Procfile). The application processes forwarded headers after checking the original socket peer; this avoids checking an already-rewritten client address. Saved account handles refresh from newly verified stakes. Previously signed notes retain their original issuer.
+
+Client `VITE_*` variables are public build-time values; rebuild/redeploy the client to change them. They must never contain secrets. User-saved connection settings take precedence over deployment suggestions. Registry requests reject redirects and rely on browser TLS certificate validation. `DEV_BROKER_PROXY_URL` configures the Vite server only; it does not configure production hosting. Compose maps `/ws` to the broker container and preserves the registry’s public issuer when mapping its key endpoint.
+
+Broker choices, channels, registry accounts (including their handles), and the selected stake provider are stored locally per identity. Switching providers changes challenge and stake requests; incoming notes are verified using the key bound to their signed stake’s `iss` domain. The client derives each issuer from the configured registry URL’s host and port; unknown issuers and signatures made with another registry’s key are rejected. The same binding applies to control frames, fetched stakes, restored identities, and cached notes. Configure one registry URL per issuer; different paths on the same host cannot represent separate registry identities. The broker discovers public registry keys by issuer and caches them; local/private registries require an explicit broker endpoint mapping.
+
+The browser client supports generating keys, importing unencrypted PKCS#8 PEM keys, and restoring an existing registered identity through **Import Identity**. If browser identity metadata is lost but its IndexedDB key remains, **Restore the key stored in this browser** can recover it without exporting the private key. Newly generated registration keys are staged separately and reused after interrupted attempts; the active key is replaced only after registration or restoration succeeds. Private keys are stored as non-extractable keys and cannot be exported. Key rotation and revocation are not implemented in the browser client; use the registry API for those operations. Entering a recovery email during onboarding sends only its normalized SHA-256 hash. Recovery delivery is unfinished: the registry email-init endpoint currently returns a development debug token and does not send an email.
 
 ---
 
@@ -489,29 +516,42 @@ make test    # run all test suites
 
 ### Running tests individually
 
+Broker cache, issuer validation, and transport tests: `cd broker && go test -race ./...`.
+
+Client regression checks (Node 22.15+ or 24+): `npm --prefix client test`. Production and TypeScript validation: `npm --prefix client run build`.
+
 ```bash
 # Registry (pytest)
-docker compose run --rm registry python -m pytest
+docker compose run --build --rm registry python -m pytest
 
 # Broker (go test)
-docker compose run --rm broker go test ./...
+docker compose run --build --rm broker go test ./...
 
-# Client (TypeScript type-check)
-docker compose run --rm client npm run typecheck
+# Client (TypeScript and regression tests)
+docker compose run --build --rm client npm run typecheck
+docker compose run --build --rm client npm test
 ```
 
 ### Registry API quick reference
 
 ```
 POST /challenge                     → { nonce, expires_at }
-POST /register                      → { fingerprint }
-POST /stake                         → [ stake_payload, stake_sig_b64 ]
-GET  /key/{fingerprint}             → { public_key, user_tag, display_name, registered_at }
-GET  /handle/{user_tag}             → { fingerprint, public_key, display_name, registered_at }
-GET  /registry/public-key           → { public_key }
-POST /rotate/challenge              → { old_nonce, new_nonce, expires_at }
-POST /rotate                        → { fingerprint }
-POST /revoke                        → 204
-POST /revoke/email-init             → 204
-POST /revoke/email-confirm          → 204
+POST /register                      → { fingerprint, handle }
+POST /stake                         → { stake: [stake_payload, stake_sig_b64] }
+GET  /key/{fingerprint}              → { fingerprint, public_key, user_tag, display_name }
+GET  /handle/{user_tag}              → { fingerprint, user_tag, display_name }
+GET  /registry/public-key            → { public_key }
+POST /rotate/challenge              → { nonce, expires_at }
+POST /rotate                        → { new_fingerprint }
+POST /revoke                        → { revoked: true }
+POST /revoke/email-init             → { message, debug_token }  # development only; no email sent
+POST /revoke/email-confirm          → { revoked: true, fingerprint }
 ```
+
+### Client validation and remaining functionality
+
+The client regression suite covers issuer/key binding, signed peer-history pagination, same-second cursors, multiple peers, overlapping data, same-identity sessions, frame-size budgeting, retries after lost pages or temporary storage failures, mixed trusted/untrusted history, cancellation, and unsolicited reply rejection. Broker tests cover request-correlated routing in addition to signature validation and bounded caches. Browser checks use isolated profiles to verify IndexedDB migration and actual peer transfers through the local broker.
+
+New note and relay signatures use consistent canonical JSON across JavaScript, Go, and Python: recursively sorted object keys, compact encoding, UTF-8 text without HTML escaping, and escaped U+2028/U+2029 separators. This avoids failures for notes containing `&`, `<`, emoji, or accented text. Verification binds each stake issuer to its registry key before trusting the author key.
+
+Still outside this client implementation: safe multi-registry key rotation/revocation, export of non-extractable browser keys, production email recovery, offline peer discovery, centralized persistent archive nodes, and rate limiting for genuinely new valid JTIs. The broker's bounded LRU cache suppresses replay while a JTI is retained; it is not a rate limit for novel notes.

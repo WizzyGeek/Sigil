@@ -1,10 +1,12 @@
 package hub
 
 import (
-	"crypto/rsa"
+	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"sync"
+	"time"
 
 	"nhooyr.io/websocket"
 
@@ -15,6 +17,7 @@ import (
 type inboundEnvelope struct {
 	client *Client
 	data   []byte
+	claims *protocol.UNTClaims
 }
 
 // Hub manages all connected clients and their channel subscriptions.
@@ -24,11 +27,13 @@ type Hub struct {
 	subscriptions map[string]map[string]bool // channel → set of client IDs
 	fingerprints  map[string]string          // author fingerprint → client ID (unicast index)
 
-	registryKey       *rsa.PublicKey
+	registryKeys      *registry.KeyCache
 	minFreshnessScore int
 	maxFrameBytes     int
 	maxContentBytes   int
 	maxRelayBatch     int
+	seenJTIs          *jtiCache
+	now               func() time.Time
 
 	register   chan *Client
 	unregister chan *Client
@@ -42,16 +47,18 @@ type Config struct {
 	MaxRelayBatch     int
 }
 
-func New(registryKey *rsa.PublicKey, cfg Config) *Hub {
+func New(registryKeys *registry.KeyCache, cfg Config) *Hub {
 	return &Hub{
 		clients:           make(map[string]*Client),
 		subscriptions:     make(map[string]map[string]bool),
 		fingerprints:      make(map[string]string),
-		registryKey:       registryKey,
+		registryKeys:      registryKeys,
 		minFreshnessScore: cfg.MinFreshnessScore,
 		maxFrameBytes:     cfg.MaxFrameBytes,
 		maxContentBytes:   cfg.MaxContentBytes,
 		maxRelayBatch:     cfg.MaxRelayBatch,
+		seenJTIs:          newJTICache(jtiCacheCapacity),
+		now:               time.Now,
 		register:          make(chan *Client, 16),
 		unregister:        make(chan *Client, 16),
 		inbound:           make(chan inboundEnvelope, 256),
@@ -87,16 +94,26 @@ func (h *Hub) Run() {
 	}
 }
 
-func (h *Hub) handleMessage(env inboundEnvelope) {
-	// Pre-check: reject oversized frames before any parsing or crypto work.
-	if len(env.data) > h.maxFrameBytes {
-		log.Printf("frame too large from %s: %d bytes (max %d)", env.client.id, len(env.data), h.maxFrameBytes)
-		return
+// Key discovery happens in each connection's read pump, not in the central
+// routing loop, so an unreachable registry cannot block every connected user.
+func (h *Hub) verifyMessage(ctx context.Context, data []byte) (*protocol.UNTClaims, error) {
+	if len(data) > h.maxFrameBytes {
+		return nil, fmt.Errorf("frame too large: %d", len(data))
 	}
-
-	claims, err := protocol.VerifyUNT(env.data, h.registryKey)
+	issuer, err := protocol.ExtractIssuer(data)
 	if err != nil {
-		log.Printf("UNT verify failed from %s: %v", env.client.id, err)
+		return nil, err
+	}
+	key, err := h.registryKeys.Get(ctx, issuer)
+	if err != nil {
+		return nil, err
+	}
+	return protocol.VerifyUNT(data, key, issuer)
+}
+
+func (h *Hub) handleMessage(env inboundEnvelope) {
+	claims := env.claims
+	if claims == nil {
 		return
 	}
 
@@ -105,8 +122,16 @@ func (h *Hub) handleMessage(env inboundEnvelope) {
 		return
 	}
 
+	// Stale broadcasts are dropped before identity bookkeeping or LRU access.
+	// A five-minute-old frame is allowed; anything older is not tracked at all.
+	if claims.Type == protocol.TypeNote || claims.Type == protocol.TypeRequestNotes {
+		if claims.Jti == "" || claims.Iat < h.now().Add(-5*time.Minute).Unix() {
+			return
+		}
+	}
+
 	// Update fingerprint → connection index from every verified frame.
-	// jti deduplication is the client's responsibility (via IndexedDB).
+	// Broadcast JTI deduplication happens below, after type-specific validation.
 	if claims.AuthorFp != "" && env.client.fp == "" {
 		env.client.fp = claims.AuthorFp
 		h.mu.Lock()
@@ -127,17 +152,26 @@ func (h *Hub) handleMessage(env inboundEnvelope) {
 			log.Printf("note content too large from %s: %d bytes (max %d)", env.client.id, len(claims.Content), h.maxContentBytes)
 			return
 		}
-		h.fanout(env.client, claims.Channel, env.data)
+		if !h.seenJTIs.seen(claims.Jti) {
+			h.fanout(env.client, claims.Channel, env.data)
+		}
 
 	case protocol.TypeRequestNotes:
-		h.fanout(env.client, claims.Channel, env.data)
+		if !h.seenJTIs.seen(claims.Jti) {
+			h.seenJTIs.rememberRequest(claims.Jti, env.client.id, h.now().Unix()+300)
+			h.fanout(env.client, claims.Channel, env.data)
+		}
 
 	case protocol.TypeNoteRelay:
 		if claims.RelayCount > h.maxRelayBatch {
 			log.Printf("note_relay batch too large from %s: %d (max %d)", env.client.id, claims.RelayCount, h.maxRelayBatch)
 			return
 		}
-		h.unicast(claims.To, env.data)
+		if claims.RequestJti != "" {
+			h.unicastRequest(h.seenJTIs.requester(claims.RequestJti, h.now().Unix()), claims.To, env.data)
+		} else {
+			h.unicast(claims.To, env.data)
+		}
 
 	default:
 		log.Printf("unknown UNT type %q from %s — dropped", claims.Type, env.client.id)
@@ -210,6 +244,22 @@ func (h *Hub) unicast(fp string, data []byte) {
 	}
 }
 
+// A request JTI binds a history reply to its originating connection, including
+// when several browser sessions share the same author fingerprint.
+func (h *Hub) unicastRequest(clientID, fingerprint string, data []byte) {
+	h.mu.RLock()
+	target := h.clients[clientID]
+	h.mu.RUnlock()
+	if target == nil || target.fp != fingerprint {
+		return
+	}
+	msg := append([]byte(nil), data...)
+	select {
+	case target.send <- msg:
+	default:
+	}
+}
+
 // ServeHTTP upgrades an HTTP connection to WebSocket and registers it with the hub.
 func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
@@ -220,6 +270,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	conn.SetReadLimit(int64(h.maxFrameBytes))
 	id := registry.NewID()
 	c := newClient(id, conn, h)
 	h.register <- c

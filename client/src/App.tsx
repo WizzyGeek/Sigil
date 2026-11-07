@@ -6,12 +6,14 @@ import Onboarding from './pages/Onboarding'
 import AppPage from './pages/AppPage'
 
 function RequireIdentity({ children }: { children: React.ReactNode }) {
-  const { identity } = useIdentity()
+  const { identity, restoring } = useIdentity()
+  if (restoring) return <div role="status" className="p-6">Restoring identity…</div>
   return identity ? <>{children}</> : <Navigate to="/" replace />
 }
 
 function RedirectIfAuthed({ children }: { children: React.ReactNode }) {
-  const { identity } = useIdentity()
+  const { identity, restoring } = useIdentity()
+  if (restoring) return <div role="status" className="p-6">Restoring identity…</div>
   return identity ? <Navigate to="/app" replace /> : <>{children}</>
 }
 

@@ -2,11 +2,12 @@
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from ..auth import verify_client_signature, fingerprint_from_pem
 from ..db import get_pool
+from ..domain import registry_domain
 
 router = APIRouter()
 
@@ -26,7 +27,7 @@ class RegisterResponse(BaseModel):
 
 
 @router.post("/register", response_model=RegisterResponse)
-async def register(body: RegisterRequest) -> RegisterResponse:
+async def register(body: RegisterRequest, request: Request) -> RegisterResponse:
     pool = get_pool()
 
     async with pool.connection() as conn:
@@ -73,5 +74,4 @@ async def register(body: RegisterRequest) -> RegisterResponse:
                 (fp, body.recovery_email_hash),
             )
 
-    from ..config import settings
-    return RegisterResponse(fingerprint=fp, handle=f"@{body.user_tag}@{settings.registry_domain}")
+    return RegisterResponse(fingerprint=fp, handle=f"@{body.user_tag}@{registry_domain(request)}")

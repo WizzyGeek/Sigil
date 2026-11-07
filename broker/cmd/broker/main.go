@@ -1,10 +1,13 @@
 package main
 
 import (
+	"encoding/json"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
+	"time"
 
 	"sigil/broker/internal/hub"
 	"sigil/broker/internal/registry"
@@ -28,10 +31,29 @@ func main() {
 		port = "8080"
 	}
 
-	registryKeyURL := os.Getenv("REGISTRY_PUBLIC_KEY_URL")
-	if registryKeyURL == "" {
-		log.Fatal("REGISTRY_PUBLIC_KEY_URL is required")
+	overrides := make(map[string]string)
+	// Retain the old setting as an optional explicit mapping, not a startup dependency.
+	if endpoint := os.Getenv("REGISTRY_PUBLIC_KEY_URL"); endpoint != "" {
+		u, err := url.Parse(endpoint)
+		if err != nil {
+			log.Fatalf("Invalid REGISTRY_PUBLIC_KEY_URL: %v", err)
+		}
+		overrides[u.Host] = endpoint
 	}
+	if raw := os.Getenv("REGISTRY_KEY_URLS"); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &overrides); err != nil {
+			log.Fatalf("Invalid REGISTRY_KEY_URLS: %v", err)
+		}
+	}
+	fetcher, err := registry.NewKeyFetcher(overrides)
+	if err != nil {
+		log.Fatal(err)
+	}
+	keyTTL := envInt("REGISTRY_KEY_TTL_SECONDS", 300)
+	if keyTTL == 0 || uint64(keyTTL) > uint64((1<<63-1)/int64(time.Second)) {
+		log.Fatal("REGISTRY_KEY_TTL_SECONDS must be a positive representable duration")
+	}
+	registryKeys := registry.NewKeyCache(fetcher.Fetch, time.Duration(keyTTL)*time.Second, registry.DefaultCapacity)
 
 	minFreshness := envInt("MIN_FRESHNESS_SCORE", 1)
 	if minFreshness > 5 {
@@ -45,13 +67,7 @@ func main() {
 		MaxRelayBatch:     envInt("MAX_RELAY_BATCH", 25),
 	}
 
-	registryKey, err := registry.FetchPublicKey(registryKeyURL)
-	if err != nil {
-		log.Fatalf("Failed to fetch registry public key: %v", err)
-	}
-	log.Println("Registry public key loaded")
-
-	h := hub.New(registryKey, cfg)
+	h := hub.New(registryKeys, cfg)
 	go h.Run()
 
 	mux := http.NewServeMux()

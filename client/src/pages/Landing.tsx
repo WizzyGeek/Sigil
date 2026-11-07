@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import FreshnessLock from '../components/FreshnessLock'
+import { config } from '../config'
 import type { FreshnessScore } from '../types/protocol'
 
 function DiamondLogo({ size = 13 }: { size?: number }) {
@@ -325,12 +326,12 @@ export default function Landing() {
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 24 }}>
           <button
-            onClick={() => navigate('/app')}
+            onClick={() => navigate('/onboarding?mode=signin')}
             style={{ fontSize: 13.5, color: 'rgba(255,255,255,0.6)', background: 'none', border: 'none', cursor: 'pointer', fontFamily: "'JetBrains Mono',monospace" }}
             onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.9)')}
             onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.6)')}
           >
-            Sign In
+            Import Identity
           </button>
           <button
             onClick={() => navigate('/onboarding')}
@@ -362,7 +363,7 @@ export default function Landing() {
             animation: 'sgFade 0.8s ease both',
           }}>
             <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#d6b06a', animation: 'sgPulse 1.9s ease-in-out infinite', boxShadow: '0 0 8px rgba(214,176,106,0.7)' }} />
-            open protocol · no accounts · no servers
+            open protocol · local keys · signed notes
           </div>
 
           <h1 style={{
@@ -370,7 +371,7 @@ export default function Landing() {
             color: '#f6f3ec', textWrap: 'balance' as never,
             animation: 'sgUp 0.7s cubic-bezier(0.22,1,0.36,1) 0.1s both',
           }}>
-            No servers.<br />No algorithms.<br />
+            Your keys.<br />Your notes.<br />
             <span style={{ color: 'rgba(255,255,255,0.45)' }}>Just math.</span>
           </h1>
 
@@ -378,7 +379,7 @@ export default function Landing() {
             maxWidth: 460, margin: '26px 0 0', fontSize: 17, lineHeight: 1.62, color: 'rgba(255,255,255,0.58)',
             animation: 'sgUp 0.7s cubic-bezier(0.22,1,0.36,1) 0.18s both',
           }}>
-            SIGIL is a cryptographically signed, decentralized notes protocol. Every note is signed by your private key. Every identity is verified by math. No company stores your words.
+            SIGIL is a cryptographically signed, decentralized notes protocol. Every note is signed by your private key. Registries endorse identities, brokers relay notes, and your browser verifies signatures.
           </p>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginTop: 38, animation: 'sgUp 0.7s cubic-bezier(0.22,1,0.36,1) 0.26s both' }}>
@@ -398,6 +399,7 @@ export default function Landing() {
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h13M13 6l6 6-6 6" /></svg>
             </button>
             <button
+              onClick={() => document.getElementById('protocol')?.scrollIntoView({ behavior: 'smooth' })}
               style={{
                 display: 'inline-flex', alignItems: 'center', height: 52, padding: '0 28px',
                 borderRadius: 13, border: '1px solid rgba(255,255,255,0.14)', background: 'rgba(255,255,255,0.04)',
@@ -415,7 +417,7 @@ export default function Landing() {
           </p>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 48, flexWrap: 'wrap', animation: 'sgFade 1s ease 0.6s both' }}>
-            {['0 servers store your notes', 'RSA-2048 signed, every note', 'Federated — run your own relay'].map(s => (
+            {['Keys stored on your device', 'Cryptographically signed notes', 'Choose your registry and broker'].map(s => (
               <div key={s} style={{ padding: '9px 16px', borderRadius: 100, border: '1px solid rgba(255,255,255,0.09)', background: 'rgba(255,255,255,0.03)', backdropFilter: 'blur(10px)', fontFamily: "'JetBrains Mono',monospace", fontSize: 11, color: 'rgba(255,255,255,0.65)' }}>
                 {s}
               </div>
@@ -440,18 +442,18 @@ export default function Landing() {
                 n: '01', title: 'Your Identity',
                 icon: <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><circle cx="8" cy="8" r="5" stroke="#d6b06a" strokeWidth="1.5" /><circle cx="8" cy="8" r="2" fill="#d6b06a" opacity="0.6" /><path d="M13 8h7M17 8v3" stroke="#d6b06a" strokeWidth="1.5" strokeLinecap="round" /></svg>,
                 desc: 'Generate an RSA keypair on your device. Your private key never leaves. Your public key is your fingerprint.',
-                visual: <div style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 10, color: 'rgba(214,176,106,0.5)', animation: 'sgHashFade 3s ease-in-out infinite', wordBreak: 'break-all' }}>sha256:a3f9·8c12<br />44bd·e721...</div>,
+                visual: <div style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 10, color: 'rgba(214,176,106,0.5)', animation: 'sgHashFade 3s ease-in-out infinite', wordBreak: 'break-all' }}>SHA-256<br />public-key fingerprint</div>,
               },
               {
                 n: '02', title: 'Your Stake',
                 icon: <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="#d6b06a" strokeWidth="1.5" /><path d="M8 12l3 3 5-6" stroke="#d6b06a" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg>,
-                desc: 'A registry signs your public key, issuing a short-lived stake — proof your key was valid at a specific moment in time.',
-                visual: <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '5px 11px', borderRadius: 100, border: '1px solid rgba(214,176,106,0.35)', background: 'rgba(214,176,106,0.06)', fontFamily: "'JetBrains Mono',monospace", fontSize: 10, color: 'rgba(214,176,106,0.7)' }}>✓ ENDORSED · 14:02:31Z</div>,
+                desc: 'A registry signs your public key, issuing a timestamped stake — proof your key was valid at a specific moment in time.',
+                visual: <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '5px 11px', borderRadius: 100, border: '1px solid rgba(214,176,106,0.35)', background: 'rgba(214,176,106,0.06)', fontFamily: "'JetBrains Mono',monospace", fontSize: 10, color: 'rgba(214,176,106,0.7)' }}>✓ REGISTRY SIGNATURE</div>,
               },
               {
                 n: '03', title: 'Your Note',
                 icon: <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><rect x="5" y="3" width="14" height="18" rx="2" stroke="#d6b06a" strokeWidth="1.5" /><path d="M8 8h8M8 12h8M8 16h5" stroke="#d6b06a" strokeWidth="1.5" strokeLinecap="round" /></svg>,
-                desc: 'Your note and stake are wrapped into a Unified Note Token — a self-contained JWT. Anyone can verify it without a server.',
+                desc: 'Your note and stake are wrapped into a Unified Note Token — a signed JSON frame. Anyone can verify it without a server.',
                 visual: (
                   <div style={{ position: 'relative', width: 72, height: 72, margin: 'auto' }}>
                     <div style={{ position: 'absolute', inset: 0, borderRadius: '50%', border: '1px solid rgba(214,176,106,0.4)' }} />
@@ -495,7 +497,7 @@ export default function Landing() {
               {
                 title: 'You own your identity',
                 icon: <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M12 2l7 4v6c0 5-3.5 9-7 10C8.5 21 5 17 5 12V6l7-4z" stroke="#d6b06a" strokeWidth="1.5" strokeLinejoin="round" /></svg>,
-                desc: 'Your identity is a keypair you generate. No account. No email required. No company can delete you, ban you, or hand your data to anyone. If you hold the key, you are you.',
+                desc: 'Your identity is a keypair you generate. No account. No email required. Choose which registry endorses your key and which broker relays your notes. Keep your key safe to retain access.',
               },
               {
                 title: 'Notes are unforgeable',
@@ -551,12 +553,12 @@ export default function Landing() {
               </div>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 24, fontFamily: "'JetBrains Mono',monospace", fontSize: 12 }}>
-              {['Protocol Spec', 'Run a Relay', 'Run a Registry', 'GitHub'].map(l => (
-                <a key={l} href="#" style={{ color: 'rgba(255,255,255,0.5)', textDecoration: 'none' }}
-                  onMouseEnter={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.85)')}
-                  onMouseLeave={e => (e.currentTarget.style.color = 'rgba(255,255,255,0.5)')}>
-                  {l}
-                </a>
+              {[{ label: 'Protocol overview', href: '#protocol' }, ...(config.repositoryUrl ? [
+                { label: 'Run a Relay', href: `${config.repositoryUrl.replace(/\/$/, '')}#quick-start` },
+                { label: 'Run a Registry', href: `${config.repositoryUrl.replace(/\/$/, '')}#quick-start` },
+                { label: 'Source', href: config.repositoryUrl },
+              ] : [])].map(({ label, href }) => (
+                <a key={label} href={href} style={{ color: 'rgba(255,255,255,0.5)', textDecoration: 'none' }}>{label}</a>
               ))}
             </div>
             <span style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 11, color: 'rgba(255,255,255,0.38)' }}>Open protocol. No company controls this network.</span>

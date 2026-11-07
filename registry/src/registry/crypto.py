@@ -38,7 +38,7 @@ def get_public_key() -> RSAPublicKey:
     return _public_key
 
 
-def mint_stake(user_tag: str, public_key_pem: str, display_name: str | None = None) -> list:
+def mint_stake(user_tag: str, public_key_pem: str, display_name: str | None = None, *, registry_domain: str) -> list:
     """Issue a signed stake frame [payload, sig_b64] for a registered identity.
 
     Signing input: canonical JSON (keys sorted, no whitespace) of the payload.
@@ -51,11 +51,11 @@ def mint_stake(user_tag: str, public_key_pem: str, display_name: str | None = No
     payload = {
         "display_name": display_name,
         "iat": int(time.time()),
-        "iss": settings.registry_domain,
+        "iss": registry_domain,
         "public_key": public_key_pem,
         "user_tag": f"@{user_tag}",
     }
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).replace("\u2028", "\\u2028").replace("\u2029", "\\u2029").encode()
     sig_bytes = get_private_key().sign(canonical, padding.PKCS1v15(), hashes.SHA256())
     sig_b64 = base64.b64encode(sig_bytes).decode()
     return [payload, sig_b64]

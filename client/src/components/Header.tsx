@@ -34,7 +34,7 @@ export default React.memo(function Header({ channelTitle, relayCount, settingsOp
           className="text-white/35 text-[13px] pl-3 border-l border-white/[0.08]"
           style={{ fontFamily: 'JetBrains Mono, monospace' }}
         >
-          #{channelTitle}
+          {channelTitle ? `#${channelTitle}` : 'No channel selected'}
         </span>
       </div>
 
@@ -44,7 +44,7 @@ export default React.memo(function Header({ channelTitle, relayCount, settingsOp
             className="inline-block w-1.5 h-1.5 rounded-full bg-gold"
             style={{ animation: 'sgPulse 2s ease-in-out infinite' }}
           />
-          <span>{relayCount} {relayCount === 1 ? 'relay' : 'relays'}</span>
+          <span>{relayCount} {relayCount === 1 ? 'broker connected' : 'brokers connected'}</span>
         </div>
         <button
           onClick={onToggleSettings}

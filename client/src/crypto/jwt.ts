@@ -12,7 +12,7 @@ function canonicalJson(value: unknown): unknown {
   if (value === null || typeof value !== 'object') return value
   if (Array.isArray(value)) return value.map(canonicalJson)
   const obj = value as Record<string, unknown>
-  const sorted: Record<string, unknown> = {}
+  const sorted: Record<string, unknown> = Object.create(null)
   for (const key of Object.keys(obj).sort()) {
     sorted[key] = canonicalJson(obj[key])
   }
@@ -20,7 +20,7 @@ function canonicalJson(value: unknown): unknown {
 }
 
 export function canonicalJsonString(value: unknown): string {
-  return JSON.stringify(canonicalJson(value))
+  return JSON.stringify(canonicalJson(value)).replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029')
 }
 
 /** Sign a payload object. Returns a 2-part frame [payload, sig_b64]. */

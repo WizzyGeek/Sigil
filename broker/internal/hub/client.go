@@ -38,7 +38,16 @@ func (c *Client) readPump(ctx context.Context) {
 		if err != nil {
 			return
 		}
-		c.hub.inbound <- inboundEnvelope{client: c, data: data}
+		claims, err := c.hub.verifyMessage(ctx, data)
+		if err != nil {
+			log.Printf("UNT verify failed from %s: %v — dropped", c.id, err)
+			continue
+		}
+		select {
+		case c.hub.inbound <- inboundEnvelope{client: c, data: data, claims: claims}:
+		case <-ctx.Done():
+			return
+		}
 	}
 }
 

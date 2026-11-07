@@ -4,6 +4,8 @@ export type UNTFrame = [Record<string, unknown>, string]
 /** 2-part stake frame embedded inside the outer payload. */
 export type StakeFrame = [UNTInnerClaims, string]
 
+export interface HistoryCursor { iat: number; jti: string }
+
 /** Decoded outer UNT claims (author-signed). */
 export interface UNTOuterClaims {
   jti: string
@@ -16,8 +18,13 @@ export interface UNTOuterClaims {
   content?: string
   reply_to?: string | null
   // request_notes-only:
+  before?: HistoryCursor // strict (iat, jti) cursor for same-second pagination
   till?: number       // fetch notes with iat < till (defaults to now)
   // note_relay-only:
+  peer_id?: string // responder session, or target session on a continuation request
+  request_jti?: string // binds a relay to an outstanding request
+  next_cursor?: HistoryCursor | null
+  has_more?: boolean
   to?: string         // recipient fingerprint for unicast routing
   relays?: UNTFrame[] // batch of original [note_payload, sig] frames
 }
@@ -38,6 +45,8 @@ export interface Note {
   jti: string
   channel: string
   body: string
+  displayName?: string
+  replyTo?: string
   author: string        // @handle@registry (fully-qualified)
   authorFp: string      // sha256:hex fingerprint
   registry: string

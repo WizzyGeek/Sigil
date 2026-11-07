@@ -1,6 +1,7 @@
 package registry
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -9,6 +10,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 )
@@ -23,7 +25,15 @@ func NewID() string {
 // FetchPublicKey fetches and parses the registry's RSA public key from its /registry/public-key endpoint.
 func FetchPublicKey(url string) (*rsa.PublicKey, error) {
 	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get(url)
+	return fetchPublicKey(context.Background(), client, url)
+}
+
+func fetchPublicKey(ctx context.Context, client *http.Client, url string) (*rsa.PublicKey, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetch registry key: %w", err)
 	}
@@ -36,7 +46,14 @@ func FetchPublicKey(url string) (*rsa.PublicKey, error) {
 	var body struct {
 		PublicKey string `json:"public_key"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 65537))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > 65536 {
+		return nil, errors.New("registry key response exceeds 64 KiB")
+	}
+	if err := json.Unmarshal(data, &body); err != nil {
 		return nil, fmt.Errorf("decode registry key response: %w", err)
 	}
 

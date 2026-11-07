@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react'
 import { useIdentity } from '../store/identity'
 import { BrokerClient } from '../api/broker'
-import { saveNote, getNotesByChannel, hasNote } from '../store/notes'
+import { saveNoteIfNew, getNotesByChannel, getHistoryPage } from '../store/notes'
 import { verifyUnt, buildUnt, buildCommand } from '../crypto/unt'
 import { importPublicKeyPem } from '../crypto/jwt'
-import { fetchRegistryPublicKey, requestChallenge, requestStake } from '../api/registry'
+import { fetchRegistryPublicKey, requestChallenge, requestStake, register, isHandleAvailable, lookupKey, RegistryError } from '../api/registry'
 import { loadKeypair } from '../crypto/keystore'
 import { fingerprintFromSpki } from '../crypto/fingerprint'
 import type { Note, UNTFrame, StakeFrame } from '../types/protocol'
@@ -12,32 +12,44 @@ import Header from '../components/Header'
 import Sidebar, { type ChannelItem } from '../components/Sidebar'
 import NoteList from '../components/MasonryGrid'
 import BottomBar from '../components/BottomBar'
-
-const DEFAULT_BROKER = import.meta.env.VITE_DEFAULT_BROKER_URL as string
-const DEFAULT_REGISTRY = (import.meta.env.VITE_REGISTRY_URL as string | undefined) ?? 'localhost:8000'
+import { createRegistryKeyring, registryIssuer, verifyStake, type RegistryKeyring } from '../crypto/registryTrust'
+import { config, normalizeUrl } from '../config'
+import { PeerHistory, peerFingerprint, type HistoryStatus } from '../history/peerHistory'
+import { loadPreferences, savePreferences } from '../store/preferences'
 
 export default React.memo(function AppPage() {
   const { identity } = useIdentity()
+  const [preferences, setPreferences] = useState(() => {
+    const url = normalizeUrl(identity?.registryUrl ?? config.registryUrl, 'registry')
+    return loadPreferences(identity!.fingerprint, url ? { url, handle: identity!.handle } : undefined)
+  })
+  const { brokerUrl, registries: accounts, selectedRegistry, activeChannel } = preferences
+  const registries = accounts.map(account => account.url)
+  const selectedAccount = accounts.find(account => account.url === selectedRegistry)
+  const registryUrl = selectedRegistry
+  const [brokerDraft, setBrokerDraft] = useState(brokerUrl)
   const [connected, setConnected] = useState(false)
-  const [channels, setChannels] = useState<ChannelItem[]>([
-    { name: 'general', unread: 0 },
-    { name: 'crypto', unread: 0 },
-    { name: 'dev', unread: 0 },
-    { name: 'signal', unread: 0 },
-  ])
-  const [activeChannel, setActiveChannel] = useState('general')
+  const [unread, setUnread] = useState<Record<string, number>>({})
+  const channels: ChannelItem[] = preferences.channels.map(name => ({ name, unread: unread[name] ?? 0 }))
   const [notes, setNotes] = useState<Note[]>([])
   const [broker, setBroker] = useState<BrokerClient | null>(null)
-  const [registryKey, setRegistryKey] = useState<CryptoKey | null>(null)
-
-  // Settings panel
+  const [registryRefresh, setRegistryRefresh] = useState(0)
+  const [registryKeys, setRegistryKeys] = useState<RegistryKeyring>(new Map())
+  const registryKey = registryUrl ? registryKeys.get(registryIssuer(registryUrl)) : undefined
+  const [error, setError] = useState('')
+  const historyPeerId = useRef(crypto.randomUUID())
+  const history = useRef<PeerHistory | null>(null)
+  const [historyStatus, setHistoryStatus] = useState<HistoryStatus | null>(null)
+  const [replyTo, setReplyTo] = useState<Note | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const settingsRef = useRef<HTMLDivElement>(null)
 
-  // Registries / stake provider
-  const derivedRegistry = identity?.handle?.split('@').slice(-1)[0] ?? DEFAULT_REGISTRY
-  const [registries, setRegistries] = useState<string[]>([derivedRegistry])
-  const [selectedRegistry, setSelectedRegistry] = useState(derivedRegistry)
+  const setSelectedRegistry = (url: string) => setPreferences(prev => ({ ...prev, selectedRegistry: url }))
+
+  useEffect(() => {
+    try { savePreferences(identity!.fingerprint, preferences) }
+    catch { setError('Could not save settings in this browser.') }
+  }, [identity?.fingerprint, preferences])
 
   // Add Registry modal
   const [addRegistryOpen, setAddRegistryOpen] = useState(false)
@@ -50,167 +62,154 @@ export default React.memo(function AppPage() {
   const [modalRegistering, setModalRegistering] = useState(false)
   const [modalRegError, setModalRegError] = useState('')
 
-  // Stake cache: re-use within 25s (freshness score ≥ 3), fetch fresh otherwise
-  const stakeCache = useRef<StakeFrame | null>(null)
-  const stakeCacheAt = useRef<number>(0)
-
+  const stakeCache = useRef(new Map<string, StakeFrame>())
+  const registryUrls = JSON.stringify(registries)
   useEffect(() => {
-    fetchRegistryPublicKey()
-      .then(pem => importPublicKeyPem(pem))
-      .then(setRegistryKey)
-      .catch(console.error)
-  }, [])
+    let cancelled = false
+    setRegistryKeys(new Map())
+    stakeCache.current.clear()
+    const urls = JSON.parse(registryUrls) as string[]
+    Promise.all(urls.map(async url => {
+      try {
+        const key = await importPublicKeyPem(await fetchRegistryPublicKey(url))
+        return [url, key] as const
+      } catch (err) {
+        if (!cancelled) setError(`Registry ${url}: ${(err as Error).message}`)
+        return null
+      }
+    })).then(entries => {
+      if (cancelled) return
+      try { setRegistryKeys(createRegistryKeyring(entries.filter(entry => entry !== null))) }
+      catch (err) { setError((err as Error).message) }
+    })
+    return () => { cancelled = true }
+  }, [registryUrls, registryRefresh])
+
+  const getStake = useCallback(async (): Promise<StakeFrame> => {
+    if (!identity || !registryUrl) throw new Error('Choose a registered stake provider in Settings.')
+    const cached = stakeCache.current.get(registryUrl)
+    const providerKey = registryKeys.get(registryIssuer(registryUrl))
+    if (!providerKey) throw new Error('Registry verification key is not available. Reconnect the registry.')
+    const providerKeys = createRegistryKeyring([[registryUrl, providerKey]])
+    if (cached && Math.floor(Date.now() / 1000) - cached[0].iat < 25) {
+      await verifyStake(cached, providerKeys)
+      return cached
+    }
+    const { nonce } = await requestChallenge(identity.fingerprint, registryUrl)
+    const sigBuf = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', identity.privateKey, new TextEncoder().encode(nonce))
+    const signature = btoa(String.fromCharCode(...new Uint8Array(sigBuf)))
+    const { stake } = await requestStake({ fingerprint: identity.fingerprint, nonce, signature }, registryUrl)
+    const claims = await verifyStake(stake, providerKeys)
+    if (await peerFingerprint(claims.public_key) !== 'sha256:' + identity.fingerprint) throw new Error('Registry returned a stake for a different key.')
+    const handle = `@${claims.user_tag.replace(/^@/, '')}@${claims.iss}`
+    setPreferences(prev => {
+      const account = prev.registries.find(account => account.url === registryUrl)
+      if (!account || account.handle === handle) return prev
+      return { ...prev, registries: prev.registries.map(account => account.url === registryUrl ? { ...account, handle } : account) }
+    })
+    stakeCache.current.set(registryUrl, stake)
+    return stake
+  }, [identity, registryUrl, registryKeys])
+
+  const verifyNote = useCallback((frame: UNTFrame) => verifyUnt(frame, registryKeys), [registryKeys])
 
   const activeChannelRef = useRef(activeChannel)
   useEffect(() => { activeChannelRef.current = activeChannel }, [activeChannel])
 
-  const handleFrame = useCallback(
-    async (frame: UNTFrame) => {
-      if (!registryKey) return
-      const payload = frame[0] as Record<string, unknown>
+  const acceptNote = useCallback((note: Note) => {
+    if (note.channel === activeChannelRef.current) {
+      setNotes(prev => prev.some(n => n.jti === note.jti) ? prev : [...prev, note].sort((a, b) => a.issuedAt - b.issuedAt || (a.jti < b.jti ? -1 : 1)))
+    } else {
+      setUnread(prev => ({ ...prev, [note.channel]: (prev[note.channel] ?? 0) + 1 }))
+    }
+  }, [])
 
-      if (payload.type === 'request_notes') {
-        if (!broker || !identity) return
-        // Log(n) picking: respond only if sha256(jti || own_fp)[0] < 0x40 (~25%)
-        const jtiBytes = new TextEncoder().encode(payload.jti as string)
-        const fpBytes = new TextEncoder().encode(identity.fingerprint)
-        const combined = new Uint8Array(jtiBytes.length + fpBytes.length)
-        combined.set(jtiBytes)
-        combined.set(fpBytes, jtiBytes.length)
-        const hashBuf = await crypto.subtle.digest('SHA-256', combined)
-        if (new Uint8Array(hashBuf)[0] >= 0x40) return
-
-        const channel = payload.channel as string
-        const till = (payload.till as number | undefined) ?? Math.floor(Date.now() / 1000)
-        const cached = await getNotesByChannel(channel)
-        const relays = cached
-          .filter(n => n.issuedAt < till)
-          .sort((a, b) => b.issuedAt - a.issuedAt)
-          .slice(0, 25)
-          .map(n => { try { return JSON.parse(n.raw) as UNTFrame } catch { return null } })
-          .filter((f): f is UNTFrame => f !== null)
-        if (relays.length === 0) return
-
-        // Derive requester fingerprint from verified stake public key
-        const stakePayload = (payload.stake as [Record<string, unknown>, string])[0]
-        const pem = stakePayload.public_key as string
-        const spkiBytes = Uint8Array.from(
-          atob(pem.replace(/-----[^-]+-----/g, '').replace(/\s/g, '')),
-          c => c.charCodeAt(0),
-        )
-        const digest = await crypto.subtle.digest('SHA-256', spkiBytes)
-        const to = 'sha256:' + Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('')
-
-        try {
-          const stake = await getStake()
-          const frame = await buildCommand('note_relay', channel, stake, identity.privateKey, { to, relays })
-          broker.send(frame)
-        } catch (err) {
-          console.warn('[request_notes] relay failed:', err)
-        }
-        return
-      }
-
-      if (payload.type === 'note_relay') {
-        const relays = (payload.relays as UNTFrame[] | undefined) ?? []
-        for (const inner of relays) {
-          try {
-            const note = await verifyUnt(inner, registryKey)
-            if (await hasNote(note.jti)) continue
-            await saveNote(note)
-            if (note.channel === activeChannelRef.current) {
-              setNotes(prev => [...prev, note].sort((a, b) => a.issuedAt - b.issuedAt))
-            } else {
-              setChannels(prev =>
-                prev.map(ch => ch.name === note.channel ? { ...ch, unread: ch.unread + 1 } : ch)
-              )
-            }
-          } catch (err) {
-            console.warn('[note_relay] inner verify failed:', err)
-          }
-        }
-        return
-      }
-
-      if (payload.type !== 'note') return
-      try {
-        const note = await verifyUnt(frame, registryKey)
-        if (await hasNote(note.jti)) return
-        await saveNote(note)
-        if (note.channel === activeChannelRef.current) {
-          setNotes(prev => [...prev, note])
-        } else {
-          setChannels(prev =>
-            prev.map(ch => ch.name === note.channel ? { ...ch, unread: ch.unread + 1 } : ch)
-          )
-        }
-      } catch (err) {
-        console.warn('[handleFrame] dropped unverifiable frame:', err)
-      }
-    },
-    [registryKey, broker],
-  )
+  const handleFrame = useCallback(async (frame: UNTFrame) => {
+    const type = frame?.[0]?.type
+    if (type === 'request_notes' || type === 'note_relay') {
+      await history.current?.handle(frame)
+    } else if (type === 'note') {
+      const note = await verifyNote(frame)
+      if (await saveNoteIfNew(note)) acceptNote(note)
+    }
+  }, [verifyNote, acceptNote])
 
   const handleFrameRef = useRef(handleFrame)
   useEffect(() => { handleFrameRef.current = handleFrame }, [handleFrame])
 
   useEffect(() => {
-    let client: BrokerClient | null = null
-    const t = setTimeout(() => {
-      client = new BrokerClient(
-        DEFAULT_BROKER,
-        (frame) => handleFrameRef.current(frame),
-        setConnected,
-      )
+    setConnected(false)
+    setBroker(null)
+    if (!brokerUrl) return
+    try {
+      const client = new BrokerClient(brokerUrl, frame => { void handleFrameRef.current(frame).catch(console.error) }, setConnected)
       setBroker(client)
-    }, 0)
-    return () => {
-      clearTimeout(t)
-      client?.close()
+      return () => client.close()
+    } catch (err) {
+      setError((err as Error).message)
     }
-  }, [])
+  }, [brokerUrl])
 
-  const getStake = useCallback(async (): Promise<StakeFrame> => {
-    if (!identity) throw new Error('No identity')
-    const now = Math.floor(Date.now() / 1000)
-    if (stakeCache.current && now - stakeCacheAt.current <= 25) {
-      return stakeCache.current
-    }
-    const { nonce } = await requestChallenge(identity.fingerprint)
-    const sigBuf = await crypto.subtle.sign(
-      'RSASSA-PKCS1-v1_5',
-      identity.privateKey,
-      new TextEncoder().encode(nonce),
-    )
-    const signature = btoa(String.fromCharCode(...new Uint8Array(sigBuf)))
-    const { stake } = await requestStake({ fingerprint: identity.fingerprint, nonce, signature })
-    stakeCache.current = stake
-    stakeCacheAt.current = now
-    return stake
-  }, [identity])
-
+  // Local history remains available while disconnected.
   useEffect(() => {
-    if (!broker || !identity || !connected) return
+    let cancelled = false
     setNotes([])
-    ;(async () => {
+    setReplyTo(null)
+    if (activeChannel) getNotesByChannel(activeChannel).then(async cached => {
+      const verified: Note[] = []
+      for (const note of cached) {
+        try { verified.push(await verifyNote(JSON.parse(note.raw) as UNTFrame)) }
+        catch { /* Old cached notes must satisfy the current registry trust mapping. */ }
+      }
+      if (!cancelled) setNotes(prev => {
+        const unique = new Map([...verified, ...prev].map(note => [note.jti, note]))
+        return [...unique.values()].sort((a, b) => a.issuedAt - b.issuedAt)
+      })
+    }).catch(err => { if (!cancelled) setError((err as Error).message) })
+    return () => { cancelled = true }
+  }, [activeChannel, verifyNote])
+
+  const joinedChannels = JSON.stringify(preferences.channels)
+  useEffect(() => {
+    setHistoryStatus(null)
+    if (!broker || !identity || !connected || !registryKey) return
+    let cancelled = false
+    const sync = new PeerHistory({
+      fingerprint: 'sha256:' + identity.fingerprint,
+      peerId: historyPeerId.current,
+      privateKey: identity.privateKey,
+      keys: registryKeys,
+      getStake,
+      send: frame => broker.send(frame),
+      readPage: getHistoryPage,
+      save: saveNoteIfNew,
+      onNote: acceptNote,
+      onStatus: (channel, status) => { if (!cancelled && channel === activeChannelRef.current) setHistoryStatus(status) },
+      onError: err => { if (!cancelled) setError(err.message) },
+      batchSize: config.historyBatchSize,
+      maxFrameBytes: config.maxFrameBytes,
+      timeoutMs: config.historyTimeoutMs,
+    })
+    history.current = sync
+    void (async () => {
       try {
         const stake = await getStake()
-        broker.send(await buildCommand('subscribe', activeChannel, stake, identity.privateKey))
-        broker.send(await buildCommand('request_notes', activeChannel, stake, identity.privateKey, {
-          till: Math.floor(Date.now() / 1000),
-        }))
-        // Merge DB notes with any live notes that already arrived while we were async.
-        const dbNotes = await getNotesByChannel(activeChannel)
-        setNotes(prev => {
-          const seen = new Set(prev.map(n => n.jti))
-          const merged = [...dbNotes.filter(n => !seen.has(n.jti)), ...prev]
-          return merged.sort((a, b) => a.issuedAt - b.issuedAt)
-        })
+        for (const channel of JSON.parse(joinedChannels) as string[]) {
+          const frame = await buildCommand('subscribe', channel, stake, identity.privateKey)
+          if (cancelled) return
+          broker.send(frame)
+        }
+        if (activeChannel && !cancelled) await sync.start(activeChannel)
       } catch (err) {
-        console.error('[subscribe] failed:', err)
+        if (!cancelled) { setError((err as Error).message); setHistoryStatus({ phase: 'incomplete', peers: 0, received: 0 }) }
       }
     })()
-  }, [broker, activeChannel, identity, connected, getStake])
+    return () => {
+      cancelled = true
+      sync.dispose()
+      if (history.current === sync) history.current = null
+    }
+  }, [broker, joinedChannels, activeChannel, identity, connected, getStake, registryKey, registryKeys, acceptNote])
 
   // Close settings on outside click
   useEffect(() => {
@@ -230,75 +229,95 @@ export default React.memo(function AppPage() {
       setModalHandleStatus('idle')
       return
     }
+    const controller = new AbortController()
     setModalHandleStatus('checking')
     const t = setTimeout(async () => {
       try {
-        const res = await fetch(`${modalUrl}/handle/${encodeURIComponent(modalHandle)}`)
-        setModalHandleStatus(res.ok ? 'taken' : 'available')
-      } catch {
-        setModalHandleStatus('available')
+        const available = await isHandleAvailable(modalUrl, modalHandle, controller.signal)
+        if (!controller.signal.aborted) setModalHandleStatus(available ? 'available' : 'taken')
+      } catch (err) {
+        if (!controller.signal.aborted) {
+          setModalHandleStatus('idle')
+          setModalRegError((err as Error).message)
+        }
       }
     }, 600)
-    return () => clearTimeout(t)
+    return () => { clearTimeout(t); controller.abort() }
   }, [modalHandle, modalReachable, modalUrl])
 
   function handleSelectChannel(name: string) {
-    setActiveChannel(name)
-    setChannels(prev => prev.map(ch => ch.name === name ? { ...ch, unread: 0 } : ch))
+    activeChannelRef.current = name
+    setPreferences(prev => ({ ...prev, activeChannel: name }))
+    setUnread(prev => ({ ...prev, [name]: 0 }))
   }
 
-  function handleAddChannel(ch: string) {
-    setChannels(prev => {
-      if (prev.some(c => c.name === ch)) return prev
-      return [...prev, { name: ch, unread: 0 }]
-    })
+  function handleAddChannel(name: string) {
+    setPreferences(prev => ({ ...prev, channels: [...new Set([...prev.channels, name])], activeChannel: name }))
+    activeChannelRef.current = name
   }
 
-  const sendNote = useCallback(
-    async (content: string) => {
-      if (!broker || !identity || !registryKey) {
-        console.error('[send] aborted — broker:', !!broker, 'identity:', !!identity, 'registryKey:', !!registryKey)
-        return
-      }
-      try {
-        const stake = await getStake()
-        const frame = await buildUnt(content, activeChannel, stake, identity.privateKey)
-        broker.send(frame)
-        // Broker excludes sender from fanout, so add own note to local state directly.
-        const note = await verifyUnt(frame, registryKey)
-        if (!(await hasNote(note.jti))) {
-          await saveNote(note)
-          setNotes(prev => [...prev, note])
-        }
-      } catch (err) {
-        console.error('[send] failed:', err)
-      }
-    },
-    [broker, identity, activeChannel, getStake, registryKey],
-  )
+  async function sendNote(content: string) {
+    if (new TextEncoder().encode(content).length > config.maxNoteBytes) throw new Error(`Note exceeds the configured ${config.maxNoteBytes}-byte limit.`)
+    if (!broker || !identity || !registryKey || !connected || !activeChannel) throw new Error('Connect a broker, choose a registry, and join a channel before sending.')
+    const channel = activeChannel
+    const stake = await getStake()
+    const frame = await buildUnt(content, channel, stake, identity.privateKey, replyTo?.jti)
+    const note = await verifyNote(frame)
+    broker.send(frame)
+    try {
+      await saveNoteIfNew(note)
+    } catch {
+      setError('Note was sent, but could not be saved in this browser.')
+    }
+    if (activeChannelRef.current === channel) {
+      setNotes(prev => prev.some(n => n.jti === note.jti) ? prev : [...prev, note])
+      setReplyTo(null)
+    }
+  }
+
+  function updateBroker(e: React.FormEvent) {
+    e.preventDefault()
+    const url = normalizeUrl(brokerDraft, 'broker')
+    if (!url) { setError('Enter a valid ws:// or wss:// broker URL.'); return }
+    setError('')
+    setPreferences(prev => ({ ...prev, brokerUrl: url }))
+  }
 
   async function connectRegistry() {
-    if (!modalUrl) return
+    if (!modalUrl || modalConnecting || modalRegistering) return
     setModalConnecting(true)
     setModalConnError('')
     setModalReachable(false)
     try {
-      const url = modalUrl.replace(/\/$/, '')
-      const res = await fetch(`${url}/registry/public-key`)
-      if (res.ok) {
-        setModalReachable(true)
-      } else {
-        setModalConnError('Could not reach this registry')
+      const url = normalizeUrl(modalUrl, 'registry')
+      if (!url) throw new Error('Use HTTPS for registries, or HTTP on localhost for development.')
+      const registryKey = await importPublicKeyPem(await fetchRegistryPublicKey(url))
+      try {
+        await lookupKey(identity!.fingerprint, url)
+        const { nonce } = await requestChallenge(identity!.fingerprint, url)
+        const sig = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', identity!.privateKey, new TextEncoder().encode(nonce))
+        const signature = btoa(String.fromCharCode(...new Uint8Array(sig)))
+        const { stake } = await requestStake({ fingerprint: identity!.fingerprint, nonce, signature }, url)
+        const claims = await verifyStake(stake, createRegistryKeyring([[url, registryKey]]))
+        setPreferences(prev => ({ ...prev, registries: [...prev.registries.filter(account => account.url !== url), { url, handle: `@${claims.user_tag.replace(/^@/, '')}@${claims.iss}` }], selectedRegistry: url }))
+        setAddRegistryOpen(false)
+        setModalUrl('')
+        setModalHandle('')
+        return
+      } catch (err) {
+        if (!(err instanceof RegistryError && err.status === 404)) throw err
       }
-    } catch {
-      setModalConnError('Could not reach this registry')
+      setModalUrl(url)
+      setModalReachable(true)
+    } catch (err) {
+      setModalConnError((err as Error).message)
     } finally {
       setModalConnecting(false)
     }
   }
 
   async function registerOnRegistry() {
-    if (!identity || !modalHandle || !modalUrl) return
+    if (!identity || !modalHandle || !modalUrl || !modalReachable || modalRegistering) return
     setModalRegistering(true)
     setModalRegError('')
     try {
@@ -310,30 +329,18 @@ export default React.memo(function AppPage() {
       const publicKeyPem = `-----BEGIN PUBLIC KEY-----\n${spkiB64.match(/.{1,64}/g)!.join('\n')}\n-----END PUBLIC KEY-----`
 
       const url = modalUrl.replace(/\/$/, '')
-      const challengeRes = await fetch(`${url}/challenge`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fingerprint: fp }),
-      })
-      if (!challengeRes.ok) throw new Error('Challenge request failed')
-      const { nonce } = await challengeRes.json() as { nonce: string }
+      const { nonce } = await requestChallenge(fp, url)
 
       const enc = new TextEncoder()
       const sigBuf = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', record.privateKey, enc.encode(nonce))
       const signature = btoa(String.fromCharCode(...new Uint8Array(sigBuf)))
 
-      const regRes = await fetch(`${url}/register`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ public_key: publicKeyPem, user_tag: modalHandle, nonce, signature }),
-      })
-      if (!regRes.ok) {
-        const err = await regRes.json().catch(() => ({})) as { detail?: string }
-        throw new Error(err.detail ?? 'Registration failed')
-      }
-
-      setRegistries(prev => [...new Set([...prev, url])])
-      setSelectedRegistry(url)
+      const result = await register({ public_key: publicKeyPem, user_tag: modalHandle, nonce, signature }, url)
+      setPreferences(prev => ({
+        ...prev,
+        registries: [...prev.registries.filter(account => account.url !== url), { url, handle: result.handle }],
+        selectedRegistry: url,
+      }))
       setAddRegistryOpen(false)
       setModalUrl('')
       setModalHandle('')
@@ -365,19 +372,24 @@ export default React.memo(function AppPage() {
           onAddChannel={handleAddChannel}
         />
 
-        <main className="flex-1 overflow-y-auto">
-          <NoteList notes={notes} />
+        <main className="flex-1 min-w-0 overflow-y-auto">
+          {activeChannel && <div className="flex items-center justify-between gap-3 px-5 py-2 text-xs text-white/45 border-b border-white/5">
+            <span role="status">{!connected ? 'Offline · showing stored notes' : historyStatus?.phase === 'syncing' ? `Fetching peer history · ${historyStatus.received} notes received` : historyStatus?.phase === 'synced' ? `History received from ${historyStatus.peers} peer${historyStatus.peers === 1 ? '' : 's'}${historyStatus.skipped ? ` · ${historyStatus.skipped} unverified entries skipped` : ''}` : historyStatus?.phase === 'no-peers' ? 'No peers replied · stored notes remain available' : historyStatus?.phase === 'incomplete' ? 'History transfer incomplete · retry to continue' : 'Preparing peer history'}</span>
+            <button disabled={!connected || !registryKey || historyStatus?.phase === 'syncing'} onClick={() => { void history.current?.start(activeChannel) }} className="text-gold disabled:opacity-40 shrink-0">Refresh history</button>
+          </div>}
+          <NoteList notes={notes} onReply={setReplyTo} emptyMessage={activeChannel ? "No notes in this channel yet." : "Add a channel to read and write notes."} />
         </main>
 
         {/* Settings panel */}
         {settingsOpen && (
           <div
             ref={settingsRef}
-            className="absolute z-40 rounded-2xl overflow-hidden"
+            className="absolute z-40 rounded-2xl overflow-y-auto"
             style={{
               top: 12,
               right: 12,
-              width: 296,
+              width: 'min(296px, calc(100% - 24px))',
+              maxHeight: 'calc(100% - 24px)',
               background: 'rgba(12,12,12,0.97)',
               border: '1px solid rgba(255,255,255,0.08)',
               backdropFilter: 'blur(20px)',
@@ -389,20 +401,9 @@ export default React.memo(function AppPage() {
               <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.25)', letterSpacing: '0.15em', textTransform: 'uppercase', marginBottom: 8 }}>
                 Identity
               </div>
-              <button className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-[13px] transition-colors text-left" style={{ color: 'rgba(255,255,255,0.7)' }}
-                onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.05)')}
-                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
-                <span style={{ color: 'rgba(255,255,255,0.4)' }}>↻</span>
-                Rotate Key
-                <span className="ml-auto" style={{ color: 'rgba(255,255,255,0.2)' }}>›</span>
-              </button>
-              <button className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-[13px] transition-colors text-left" style={{ color: 'rgba(248,113,113,0.7)' }}
-                onMouseEnter={e => (e.currentTarget.style.background = 'rgba(239,68,68,0.08)')}
-                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
-                <span>⚠</span>
-                Revoke Key
-                <span className="ml-auto" style={{ color: 'rgba(255,255,255,0.2)' }}>›</span>
-              </button>
+              <p className="text-xs break-all text-white/60">{selectedAccount?.handle ?? identity?.handle}</p>
+              <p className="mt-2 text-xs break-all text-white/40">{identity?.fingerprint}</p>
+              <p className="mt-2 text-xs text-white/40">Key rotation and revocation are not available in this client.</p>
             </div>
 
             <div style={{ borderTop: '1px solid rgba(255,255,255,0.06)', padding: '12px 16px' }}>
@@ -412,6 +413,7 @@ export default React.memo(function AppPage() {
               <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', marginBottom: 10 }}>
                 Registry that endorses your next note
               </div>
+              <button className="text-xs text-gold mb-2" onClick={() => { stakeCache.current.clear(); setRegistryRefresh(value => value + 1) }}>Refresh registry connections</button>
               {registries.map(r => (
                 <button
                   key={r}
@@ -429,9 +431,9 @@ export default React.memo(function AppPage() {
                     )}
                   </span>
                   <span className="flex-1 truncate text-left" style={{ fontSize: 12, color: 'rgba(255,255,255,0.6)', fontFamily: 'JetBrains Mono, monospace' }}>
-                    {identity?.handle ? `@${identity.handle.replace(/^@/, '').split('@')[0]} · ` : ''}{r}
+                    {accounts.find(account => account.url === r)?.handle} · {r}
                   </span>
-                  <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: connected ? 'rgba(74,222,128,0.7)' : 'rgba(248,113,113,0.5)' }} />
+                  <span className="w-1.5 h-1.5 rounded-full shrink-0" title={registryKeys.has(registryIssuer(r)) ? 'Verification key loaded' : 'Verification key unavailable'} style={{ background: registryKeys.has(registryIssuer(r)) ? 'rgba(74,222,128,0.7)' : 'rgba(248,113,113,0.5)' }} />
                 </button>
               ))}
               <button
@@ -453,21 +455,33 @@ export default React.memo(function AppPage() {
               <div className="flex items-center gap-3 px-3 py-2">
                 <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: connected ? 'rgba(74,222,128,0.7)' : 'rgba(248,113,113,0.5)' }} />
                 <span className="flex-1 truncate" style={{ fontSize: 12, color: 'rgba(255,255,255,0.5)', fontFamily: 'JetBrains Mono, monospace' }}>
-                  {DEFAULT_BROKER || 'ws://localhost:8080/ws'}
+                  {brokerUrl || 'No broker configured'}
                 </span>
-                {connected && <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.25)' }}>live</span>}
+                <span className="text-xs text-white/40">{connected ? 'Connected' : brokerUrl ? 'Reconnecting' : 'Disconnected'}</span>
               </div>
+              <form onSubmit={updateBroker} className="flex flex-col gap-2 mt-3">
+                <label htmlFor="broker-url" className="text-xs text-white/50">Broker WebSocket URL</label>
+                <input id="broker-url" value={brokerDraft} onChange={e => setBrokerDraft(e.target.value)} placeholder="wss://" className="w-full bg-white/5 border border-white/10 rounded-lg p-2 text-xs" />
+                <button className="text-xs text-gold border border-white/10 rounded-lg p-2" type="submit">Apply broker</button>
+                {brokerUrl && <button type="button" className="text-xs text-white/50" onClick={() => setPreferences(prev => ({ ...prev, brokerUrl: '' }))}>Disconnect broker</button>}
+              </form>
             </div>
           </div>
         )}
       </div>
 
+      {error && <div role="alert" className="px-4 py-2 text-sm text-red-300 flex justify-between gap-3">
+        {error}<button onClick={() => setError('')} aria-label="Dismiss error">×</button>
+      </div>}
       <BottomBar
-        handle={identity?.handle ?? '@user'}
+        handle={selectedAccount?.handle ?? identity?.handle ?? ''}
         registries={registries}
         selectedRegistry={selectedRegistry}
         onSelectRegistry={setSelectedRegistry}
         onSend={sendNote}
+        disabled={!connected || !registryKey || !activeChannel}
+        replyTo={replyTo}
+        onCancelReply={() => setReplyTo(null)}
       />
 
       {/* Add Registry modal */}
@@ -475,12 +489,13 @@ export default React.memo(function AppPage() {
         <div
           className="fixed inset-0 z-50 flex items-center justify-center"
           style={{ background: 'rgba(0,0,0,0.75)', animation: 'sgFadeIn 0.2s ease' }}
-          onMouseDown={() => setAddRegistryOpen(false)}
+          onMouseDown={() => { if (!modalRegistering && !modalConnecting) setAddRegistryOpen(false) }}
         >
           <div
-            className="rounded-2xl w-full relative"
+            className="rounded-2xl w-full relative overflow-y-auto"
             style={{
               maxWidth: 480,
+              maxHeight: '90vh',
               margin: '0 16px',
               background: 'rgba(12,12,12,0.98)',
               border: '1px solid rgba(255,255,255,0.1)',
@@ -491,6 +506,8 @@ export default React.memo(function AppPage() {
             onMouseDown={e => e.stopPropagation()}
           >
             <button
+              disabled={modalRegistering || modalConnecting}
+              aria-label="Close registry dialog"
               onClick={() => setAddRegistryOpen(false)}
               className="absolute top-4 right-4 w-8 h-8 flex items-center justify-center rounded-lg transition-colors"
               style={{ color: 'rgba(255,255,255,0.3)', fontSize: 18 }}
@@ -513,8 +530,10 @@ export default React.memo(function AppPage() {
               <div className="flex gap-2">
                 <input
                   type="text"
+                  disabled={modalConnecting || modalRegistering}
+                  aria-label="Registry URL"
                   value={modalUrl}
-                  onChange={e => { setModalUrl(e.target.value); setModalReachable(false); setModalConnError('') }}
+                  onChange={e => { setModalUrl(e.target.value); setModalReachable(false); setModalConnError(''); setModalRegError('') }}
                   placeholder="https://"
                   className="flex-1 text-sm outline-none rounded-xl px-4 py-2.5"
                   style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', color: '#f4f1ea' }}
@@ -533,7 +552,7 @@ export default React.memo(function AppPage() {
                 </button>
               </div>
               {modalReachable && (
-                <div style={{ marginTop: 8, fontSize: 12, color: 'rgba(74,222,128,0.85)' }}>Registry reachable ✓</div>
+                <div style={{ marginTop: 8, fontSize: 12, color: 'rgba(74,222,128,0.85)' }}>Registry verification key loaded ✓</div>
               )}
               {modalConnError && (
                 <div style={{ marginTop: 8, fontSize: 12, color: 'rgba(248,113,113,0.85)' }}>{modalConnError}</div>
@@ -550,8 +569,10 @@ export default React.memo(function AppPage() {
                   <span className="absolute left-4 top-1/2 -translate-y-1/2 text-sm" style={{ color: 'rgba(255,255,255,0.3)' }}>@</span>
                   <input
                     type="text"
+                    disabled={modalRegistering}
+                    aria-label="Handle"
                     value={modalHandle}
-                    onChange={e => setModalHandle(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, ''))}
+                    onChange={e => { setModalHandle(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, '')); setModalHandleStatus('idle'); setModalRegError('') }}
                     placeholder="handle"
                     className="w-full text-sm outline-none rounded-xl py-2.5 pr-4"
                     style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', color: '#f4f1ea', paddingLeft: 28 }}
@@ -571,12 +592,10 @@ export default React.memo(function AppPage() {
               </div>
             )}
 
+            {modalRegError && <div role="alert" className="mb-3 text-sm text-red-300">{modalRegError}</div>}
             {/* Register button */}
             {modalReachable && modalHandle && modalHandleStatus === 'available' && (
               <div style={{ animation: 'sgFadeUp 0.15s ease' }}>
-                {modalRegError && (
-                  <div style={{ marginBottom: 12, fontSize: 12, color: 'rgba(248,113,113,0.85)' }}>{modalRegError}</div>
-                )}
                 <button
                   onClick={registerOnRegistry}
                   disabled={modalRegistering}

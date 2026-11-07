@@ -40,7 +40,6 @@ export default React.memo(function Sidebar({ channels, activeChannel, onSelect, 
 
       <ul className="flex-1 overflow-y-auto">
         {channels.map(({ name, unread }) => {
-          const isGeneral = name === 'general'
           const isActive = name === activeChannel
           return (
             <li key={name}>
@@ -56,7 +55,7 @@ export default React.memo(function Sidebar({ channels, activeChannel, onSelect, 
                 }}
               >
                 <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', width: 12, flexShrink: 0 }}>
-                  {isGeneral ? '★' : '#'}
+                  #
                 </span>
                 <span className="flex-1 truncate">{name}</span>
                 {unread > 0 && (
@@ -81,6 +80,7 @@ export default React.memo(function Sidebar({ channels, activeChannel, onSelect, 
               value={draft}
               onChange={e => setDraft(e.target.value)}
               onBlur={() => { if (!draft) setAdding(false) }}
+              aria-label="Channel name"
               placeholder="channel-name"
               className="w-full outline-none text-xs rounded-lg px-3 py-1.5"
               style={{
@@ -89,6 +89,7 @@ export default React.memo(function Sidebar({ channels, activeChannel, onSelect, 
                 color: '#f4f1ea',
               }}
             />
+            <div className="flex gap-3 mt-2 text-xs text-white/60"><button type="submit">Join</button><button type="button" onClick={() => { setAdding(false); setDraft('') }}>Cancel</button></div>
           </form>
         ) : (
           <button

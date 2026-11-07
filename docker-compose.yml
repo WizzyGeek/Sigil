@@ -23,6 +23,8 @@ services:
       target: dev
     volumes:
       - ./registry/src:/app/src
+      - ./registry/tests:/app/tests:ro
+      - ./registry/pyproject.toml:/app/pyproject.toml:ro
     ports:
       - "8000:8000"
     env_file: ./registry/.env
@@ -55,7 +57,7 @@ services:
     env_file: ./broker/.env
     environment:
       # override localhost from .env → docker service name
-      REGISTRY_PUBLIC_KEY_URL: http://registry:8000/registry/public-key
+      REGISTRY_KEY_URLS: '{"localhost:8000":"http://registry:8000/registry/public-key","127.0.0.1:8000":"http://registry:8000/registry/public-key"}'
     depends_on:
       registry:
         condition: service_healthy
@@ -70,9 +72,15 @@ services:
       - ./client/tailwind.config.ts:/app/tailwind.config.ts
       - ./client/vite.config.ts:/app/vite.config.ts
       - ./client/postcss.config.js:/app/postcss.config.js
+      - ./client/tsconfig.json:/app/tsconfig.json:ro
+      - ./client/tsconfig.node.json:/app/tsconfig.node.json:ro
+      - ./client/test:/app/test:ro
     ports:
       - "5173:5173"
     env_file: ./client/.env
+    environment:
+      DEV_BROKER_PROXY_URL: ws://broker:8080
+      VITE_DEFAULT_BROKER_URL: /ws
 
 volumes:
   postgres_data:

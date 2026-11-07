@@ -14,6 +14,7 @@
  */
 
 import { signFrame, verifyFrame, importPublicKeyPem } from './jwt'
+import { verifyStake, type RegistryKeyring } from './registryTrust'
 import { fingerprintFromSpki } from './fingerprint'
 import type { UNTOuterClaims, UNTInnerClaims, UNTFrame, StakeFrame, Note, FreshnessScore } from '../types/protocol'
 
@@ -23,6 +24,7 @@ export async function buildUnt(
   channel: string,
   stake: StakeFrame,
   privateKey: CryptoKey,
+  replyTo?: string,
 ): Promise<UNTFrame> {
   const payload: UNTOuterClaims = {
     jti: crypto.randomUUID(),
@@ -30,7 +32,7 @@ export async function buildUnt(
     type: 'note',
     channel,
     content,
-    reply_to: null,
+    reply_to: replyTo ?? null,
     stake,
     stake_iat: stake[0].iat,
   }
@@ -57,29 +59,28 @@ export async function buildCommand(
   return signFrame(payload, privateKey)
 }
 
-/**
- * Verify a UNT frame using only the registry public key.
- * Throws on any failure. Only call this for type: "note" frames.
- */
-export async function verifyUnt(
+/** Verify both signatures and the stake binding for notes and control frames. */
+export async function verifyUntFrame(
   frame: UNTFrame,
-  registryPublicKey: CryptoKey,
-): Promise<Note> {
+  registryKeys: RegistryKeyring,
+): Promise<{ outer: UNTOuterClaims; inner: UNTInnerClaims }> {
+  if (!Array.isArray(frame) || frame.length !== 2 || !frame[0] || typeof frame[0] !== 'object' || typeof frame[1] !== 'string') {
+    throw new Error('Invalid UNT frame')
+  }
   const [outerPayload, outerSig] = frame
   const outer = outerPayload as unknown as UNTOuterClaims
-
-  // Step 2: verify stake with registry key → trusted stake claims
-  const [stakePayload, stakeSig] = outer.stake
-  const inner = await verifyFrame<UNTInnerClaims>([stakePayload, stakeSig], registryPublicKey)
-
-  // Step 3: verify outer with author key embedded in the stake
+  if (typeof outer.jti !== 'string' || !outer.jti || typeof outer.channel !== 'string' || !outer.channel || !Number.isSafeInteger(outer.iat) || outer.iat <= 0) throw new Error('Invalid UNT claims')
+  const inner = await verifyStake(outer.stake, registryKeys)
   const authorKey = await importPublicKeyPem(inner.public_key)
   await verifyFrame<UNTOuterClaims>([outerPayload, outerSig], authorKey)
+  if (outer.stake_iat !== inner.iat) throw new Error('stake_iat mismatch — possible stake swap attack')
+  return { outer, inner }
+}
 
-  // Step 4: stake_iat binding
-  if (outer.stake_iat !== inner.iat) {
-    throw new Error('stake_iat mismatch — possible stake swap attack')
-  }
+/** Verify a note using only the key bound to its stake issuer. */
+export async function verifyUnt(frame: UNTFrame, registryKeys: RegistryKeyring): Promise<Note> {
+  const { outer, inner } = await verifyUntFrame(frame, registryKeys)
+  if (outer.type !== 'note') throw new Error('Expected a note UNT')
 
   // Derive fingerprint from PEM bytes directly — PEM body IS the SPKI DER
   const spkiBytes = Uint8Array.from(
@@ -91,6 +92,8 @@ export async function verifyUnt(
   return {
     jti: outer.jti,
     channel: outer.channel,
+    displayName: inner.display_name ?? undefined,
+    replyTo: outer.reply_to ?? undefined,
     body: outer.content ?? '',
     author: `${inner.user_tag}@${inner.iss}`,
     authorFp,

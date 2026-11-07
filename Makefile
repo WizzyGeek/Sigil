@@ -16,6 +16,7 @@ ps:
 	docker compose ps
 
 test:
-	docker compose run --rm registry python -m pytest
-	docker compose run --rm broker go test ./...
-	docker compose run --rm client npm run typecheck
+	docker compose run --build --rm registry python -m pytest
+	docker compose run --build --rm broker go test ./...
+	docker compose run --build --rm client npm run typecheck
+	docker compose run --build --rm client npm test

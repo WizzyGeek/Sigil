@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"bytes"
 	"crypto"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -11,19 +12,21 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // UNTClaims holds the verified outer payload fields from a UNT frame.
 // Fields tagged `json:"-"` are computed during verification, never transmitted.
 type UNTClaims struct {
-	Jti      string  `json:"jti"`
-	Iat      int64   `json:"iat"`
-	Type     string  `json:"type"`
-	Channel  string  `json:"channel"`
-	Content  string  `json:"content,omitempty"`
-	ReplyTo  *string `json:"reply_to,omitempty"`
-	StakeIat int64   `json:"stake_iat"`
-	To       string  `json:"to,omitempty"` // note_relay: unicast target fingerprint
+	Jti        string  `json:"jti"`
+	Iat        int64   `json:"iat"`
+	Type       string  `json:"type"`
+	Channel    string  `json:"channel"`
+	Content    string  `json:"content,omitempty"`
+	ReplyTo    *string `json:"reply_to,omitempty"`
+	StakeIat   int64   `json:"stake_iat"`
+	RequestJti string  `json:"request_jti,omitempty"`
+	To         string  `json:"to,omitempty"` // note_relay: unicast target fingerprint
 
 	FreshnessScore int    `json:"-"` // computed from outer.iat - stake.iat
 	AuthorFp       string `json:"-"` // sha256:hex(SHA256(SPKI DER of stake.public_key))
@@ -50,10 +53,18 @@ type StakeClaims struct {
 // In Go, json.Marshal sorts map keys, so round-tripping through interface{} achieves this.
 func canonicalJSONBytes(raw json.RawMessage) ([]byte, error) {
 	var v interface{}
-	if err := json.Unmarshal(raw, &v); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&v); err != nil {
 		return nil, err
 	}
-	return json.Marshal(v)
+	var encoded bytes.Buffer
+	encoder := json.NewEncoder(&encoded)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(encoded.Bytes(), []byte("\n")), nil
 }
 
 // FingerprintFromPEM computes sha256:hex(SHA256(SPKI DER bytes)) from a public key PEM.
@@ -96,6 +107,44 @@ func verifyRSASig(key *rsa.PublicKey, payload json.RawMessage, sigB64 string) er
 	return rsa.VerifyPKCS1v15(key, crypto.SHA256, digest[:], sigBytes)
 }
 
+// parseFrame rejects malformed or extra frame elements before key discovery.
+func parseFrame(raw []byte) (json.RawMessage, string, error) {
+	var frame []json.RawMessage
+	if err := json.Unmarshal(raw, &frame); err != nil || len(frame) != 2 {
+		return nil, "", errors.New("expected a two-part signed frame")
+	}
+	var signature string
+	if err := json.Unmarshal(frame[1], &signature); err != nil || signature == "" {
+		return nil, "", errors.New("invalid frame signature")
+	}
+	return frame[0], signature, nil
+}
+
+// ExtractIssuer reads only a routing hint. No claim is trusted until VerifyUNT.
+func ExtractIssuer(raw []byte) (string, error) {
+	payload, _, err := parseFrame(raw)
+	if err != nil {
+		return "", err
+	}
+	var outer struct {
+		Stake json.RawMessage `json:"stake"`
+	}
+	if err := json.Unmarshal(payload, &outer); err != nil {
+		return "", err
+	}
+	stake, _, err := parseFrame(outer.Stake)
+	if err != nil {
+		return "", err
+	}
+	var claims struct {
+		Iss string `json:"iss"`
+	}
+	if err := json.Unmarshal(stake, &claims); err != nil || claims.Iss == "" {
+		return "", errors.New("missing registry issuer")
+	}
+	return claims.Iss, nil
+}
+
 // VerifyUNT performs 4-step UNT verification using only the registry public key.
 // The author's public key is embedded in the stake — no network calls required.
 //
@@ -106,16 +155,11 @@ func verifyRSASig(key *rsa.PublicKey, payload json.RawMessage, sigB64 string) er
 //
 // Returns verified claims with a computed FreshnessScore.
 // The caller is responsible for jti deduplication and freshness gating.
-func VerifyUNT(frameBytes []byte, registryKey *rsa.PublicKey) (*UNTClaims, error) {
+func VerifyUNT(frameBytes []byte, registryKey *rsa.PublicKey, expectedIssuer string) (*UNTClaims, error) {
 	// Step 1: parse frame as [outer_payload, outer_sig_b64]
-	var frame [2]json.RawMessage
-	if err := json.Unmarshal(frameBytes, &frame); err != nil {
-		return nil, fmt.Errorf("parse frame: %w", err)
-	}
-	outerRaw := frame[0]
-	var outerSig string
-	if err := json.Unmarshal(frame[1], &outerSig); err != nil {
-		return nil, fmt.Errorf("parse outer sig: %w", err)
+	outerRaw, outerSig, err := parseFrame(frameBytes)
+	if err != nil {
+		return nil, err
 	}
 
 	// Extract stake field (unverified) from outer payload
@@ -129,14 +173,9 @@ func VerifyUNT(frameBytes []byte, registryKey *rsa.PublicKey) (*UNTClaims, error
 	}
 
 	// Parse stake as [stake_payload, stake_sig_b64]
-	var stakeFrame [2]json.RawMessage
-	if err := json.Unmarshal(stakeRaw, &stakeFrame); err != nil {
-		return nil, fmt.Errorf("parse stake frame: %w", err)
-	}
-	stakePayloadRaw := stakeFrame[0]
-	var stakeSig string
-	if err := json.Unmarshal(stakeFrame[1], &stakeSig); err != nil {
-		return nil, fmt.Errorf("parse stake sig: %w", err)
+	stakePayloadRaw, stakeSig, err := parseFrame(stakeRaw)
+	if err != nil {
+		return nil, err
 	}
 
 	// Step 2: verify stake signature with registry key
@@ -146,6 +185,10 @@ func VerifyUNT(frameBytes []byte, registryKey *rsa.PublicKey) (*UNTClaims, error
 	var stake StakeClaims
 	if err := json.Unmarshal(stakePayloadRaw, &stake); err != nil {
 		return nil, fmt.Errorf("decode stake: %w", err)
+	}
+
+	if expectedIssuer == "" || !strings.EqualFold(stake.Iss, expectedIssuer) {
+		return nil, errors.New("registry issuer does not match selected verification key")
 	}
 
 	// Step 3: verify outer signature with author's public key (embedded in verified stake)

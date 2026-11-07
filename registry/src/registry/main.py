@@ -2,6 +2,10 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+
+from .config import settings
+from .proxy import ForwardedHostMiddleware
 
 from .db import init_pool, close_pool
 from .routes import challenge, register, stake, lookup, rotate, revoke
@@ -22,6 +26,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Preserve the socket peer until host forwarding has been checked. Run Uvicorn
+# with --no-proxy-headers so its outer middleware does not rewrite it first.
+app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=settings.forwarded_allow_ips)
+app.add_middleware(ForwardedHostMiddleware, trusted_proxies=settings.forwarded_allow_ips)
 
 app.include_router(challenge.router)
 app.include_router(register.router)

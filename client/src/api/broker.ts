@@ -1,5 +1,6 @@
 /** Broker WebSocket client. Every wire message is a UNTFrame: [payload_object, sig_b64]. */
 
+import { config } from '../config'
 import type { UNTFrame } from '../types/protocol'
 
 type FrameHandler = (frame: UNTFrame) => void
@@ -12,6 +13,7 @@ export class BrokerClient {
   private onStatus: StatusHandler
   private retryDelay = 1000
   private dead = false
+  private retryTimer: ReturnType<typeof setTimeout> | null = null
 
   constructor(url: string, onFrame: FrameHandler, onStatus: StatusHandler) {
     this.url = url
@@ -22,14 +24,18 @@ export class BrokerClient {
 
   private connect() {
     if (this.dead) return
-    this.ws = new WebSocket(this.url)
+    const socket = new WebSocket(this.url)
+    this.ws = socket
 
-    this.ws.onopen = () => {
+    socket.onopen = () => {
+      if (this.dead || this.ws !== socket) return
       this.retryDelay = 1000
       this.onStatus(true)
     }
 
-    this.ws.onmessage = (ev) => {
+    socket.onmessage = (ev) => {
+      if (this.dead || this.ws !== socket) return
+      if (typeof ev.data !== 'string' || new TextEncoder().encode(ev.data).length > config.maxFrameBytes) return
       try {
         const frame = JSON.parse(ev.data as string) as UNTFrame
         this.onFrame(frame)
@@ -38,30 +44,33 @@ export class BrokerClient {
       }
     }
 
-    this.ws.onclose = () => {
+    socket.onclose = () => {
+      if (this.dead || this.ws !== socket) return
       this.onStatus(false)
       if (!this.dead) {
-        setTimeout(() => this.connect(), this.retryDelay)
+        this.retryTimer = setTimeout(() => this.connect(), this.retryDelay)
         this.retryDelay = Math.min(this.retryDelay * 2, 30_000)
       }
     }
 
-    this.ws.onerror = () => {
-      this.ws?.close()
+    socket.onerror = () => {
+      socket.close()
     }
   }
 
   send(frame: UNTFrame) {
     if (this.ws?.readyState === WebSocket.OPEN) {
-      console.log('[broker] →', (frame[0] as Record<string, unknown>).type)
-      this.ws.send(JSON.stringify(frame))
+      const data = JSON.stringify(frame)
+      if (new TextEncoder().encode(data).length > config.maxFrameBytes) throw new Error(`Frame exceeds the configured ${config.maxFrameBytes}-byte limit.`)
+      this.ws.send(data)
     } else {
-      console.error('[broker] send failed — socket not open', { readyState: this.ws?.readyState })
+      throw new Error('Broker is disconnected. Your draft has been kept; reconnect and try again.')
     }
   }
 
   close() {
     this.dead = true
+    if (this.retryTimer) clearTimeout(this.retryTimer)
     this.ws?.close()
   }
 }

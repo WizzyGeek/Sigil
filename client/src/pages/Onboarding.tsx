@@ -1,17 +1,19 @@
 import React, { useState, useEffect } from 'react'
-import { generateAndStoreKeypair } from '../crypto/keystore'
-import { fingerprintFromSpki } from '../crypto/fingerprint'
-import { requestChallenge, register } from '../api/registry'
-import { useIdentity } from '../store/identity'
+import { generateAndStoreKeypair, importKeypair, loadKeypair, storeKeypair, deleteKeypair, type KeyRecord } from '../crypto/keystore'
+import { fingerprintFromSpki, hashEmail } from '../crypto/fingerprint'
+import { requestChallenge, register, requestStake, fetchRegistryPublicKey, isHandleAvailable, lookupKey, RegistryError } from '../api/registry'
+import { useIdentity, type Identity } from '../store/identity'
+import { useSearchParams } from 'react-router-dom'
+import { config, normalizeUrl } from '../config'
+import { importPublicKeyPem } from '../crypto/jwt'
+import { createRegistryKeyring, verifyStake } from '../crypto/registryTrust'
 
 interface Props {
   onComplete: () => void
 }
 
 type Step = 1 | 2 | 3
-type KeypairChoice = 'generate' | 'import' | null
-
-const REGISTRY_URL = (import.meta.env.VITE_REGISTRY_URL as string | undefined) ?? 'localhost:8000'
+type KeypairChoice = 'generate' | 'import' | 'stored' | null
 
 function DiamondLogo() {
   return (
@@ -51,15 +53,25 @@ function StepIndicator({ current }: { current: Step }) {
 }
 
 export default React.memo(function Onboarding({ onComplete }: Props) {
+  const [params] = useSearchParams()
+  const restoreMode = params.get('mode') === 'signin'
+  const [privateKeyPem, setPrivateKeyPem] = useState('')
+  const [pendingIdentity, setPendingIdentity] = useState<Identity | null>(null)
   const [step, setStep] = useState<Step>(1)
-  const [keypairChoice, setKeypairChoice] = useState<KeypairChoice>(null)
+  const [keypairChoice, setKeypairChoice] = useState<KeypairChoice>(restoreMode ? 'import' : null)
+  const restoring = restoreMode || keypairChoice === 'stored'
+  const [storedKey, setStoredKey] = useState<KeyRecord | null>(null)
+  const [restoredRegistration, setRestoredRegistration] = useState(false)
 
   // Step 2 fields
+  const [registryUrl, setRegistryUrl] = useState(config.registryUrl)
+  const registryBase = normalizeUrl(registryUrl, 'registry')
   const [handle, setHandle] = useState('')
   const [displayName, setDisplayName] = useState('')
   const [recoveryOpen, setRecoveryOpen] = useState(false)
   const [recoveryEmail, setRecoveryEmail] = useState('')
-  const [handleStatus, setHandleStatus] = useState<'idle' | 'checking' | 'available' | 'taken'>('idle')
+  const [availabilityAttempt, setAvailabilityAttempt] = useState(0)
+  const [handleStatus, setHandleStatus] = useState<'idle' | 'checking' | 'available' | 'taken' | 'error'>('idle')
 
   // Submission state
   const [error, setError] = useState('')
@@ -68,48 +80,82 @@ export default React.memo(function Onboarding({ onComplete }: Props) {
 
   const { setIdentity } = useIdentity()
 
+  useEffect(() => {
+    void loadKeypair().then(setStoredKey).catch(error => setError((error as Error).message))
+  }, [])
+
   // Handle availability debounce
   useEffect(() => {
-    if (!handle) { setHandleStatus('idle'); return }
+    if (restoring || !handle || !registryBase) { setHandleStatus('idle'); return }
+    const controller = new AbortController()
     setHandleStatus('checking')
     const t = setTimeout(async () => {
       try {
-        const res = await fetch(`${REGISTRY_URL}/handle/${encodeURIComponent(handle)}`)
-        setHandleStatus(res.ok ? 'taken' : 'available')
+        const available = await isHandleAvailable(registryBase, handle, controller.signal)
+        if (!controller.signal.aborted) setHandleStatus(available ? 'available' : 'taken')
       } catch {
-        setHandleStatus('idle')
+        if (!controller.signal.aborted) setHandleStatus('error')
       }
     }, 600)
-    return () => clearTimeout(t)
-  }, [handle])
+    return () => {
+      clearTimeout(t)
+      controller.abort()
+    }
+  }, [handle, registryBase, restoring, availabilityAttempt])
 
   async function handleRegister() {
+    if (!canContinueStep2 || !registryBase || loading) return
     setError('')
     setLoading(true)
     try {
-      const record = await generateAndStoreKeypair()
+      const record = keypairChoice === 'stored' ? storedKey : keypairChoice === 'import'
+        ? await importKeypair(privateKeyPem)
+        : await loadKeypair('pending-onboarding') ?? await generateAndStoreKeypair('pending-onboarding')
+      if (!record) throw new Error('No key is available in this browser. Import a PEM backup instead.')
       const fp = await fingerprintFromSpki(record.publicKeySpki)
 
       const spkiB64 = btoa(String.fromCharCode(...new Uint8Array(record.publicKeySpki)))
       const publicKeyPem = `-----BEGIN PUBLIC KEY-----\n${spkiB64.match(/.{1,64}/g)!.join('\n')}\n-----END PUBLIC KEY-----`
 
-      const { nonce } = await requestChallenge(fp)
+      const { nonce } = await requestChallenge(fp, registryBase)
 
       const enc = new TextEncoder()
       const sigBuf = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', record.privateKey, enc.encode(nonce))
       const signature = btoa(String.fromCharCode(...new Uint8Array(sigBuf)))
 
-      const result = await register({
-        public_key: publicKeyPem,
-        user_tag: handle,
-        display_name: displayName || undefined,
-        nonce,
-        signature,
-      })
-
-      setIdentity({
+      let result: { fingerprint: string; handle: string }
+      let existingRegistration = restoring
+      if (!existingRegistration) {
+        try { await lookupKey(fp, registryBase); existingRegistration = true }
+        catch (error) { if (!(error instanceof RegistryError && error.status === 404)) throw error }
+      }
+      if (existingRegistration) {
+        const { stake } = await requestStake({ fingerprint: fp, nonce, signature }, registryBase)
+        const key = await importPublicKeyPem(await fetchRegistryPublicKey(registryBase))
+        const claims = await verifyStake(stake, createRegistryKeyring([[registryBase, key]]))
+        const claimedSpki = Uint8Array.from(atob(claims.public_key.replace(/-----[^-]+-----/g, '').replace(/\s/g, '')), c => c.charCodeAt(0)).buffer
+        if (await fingerprintFromSpki(claimedSpki) !== fp) throw new Error('Registry returned a stake for a different key.')
+        result = { fingerprint: fp, handle: `@${claims.user_tag.replace(/^@/, '')}@${claims.iss}` }
+      } else {
+        result = await register({
+          public_key: publicKeyPem,
+          user_tag: handle,
+          display_name: displayName || undefined,
+          nonce,
+          signature,
+          recovery_email_hash: recoveryEmail.trim() ? await hashEmail(recoveryEmail) : undefined,
+        }, registryBase)
+      }
+      if (result.fingerprint !== fp) throw new Error('Registry returned a different key fingerprint.')
+      if (typeof result.handle !== 'string' || !result.handle.toLowerCase().endsWith('@' + new URL(registryBase).host.toLowerCase())) throw new Error('Registry returned a handle for a different issuer.')
+      await storeKeypair({ ...record, id: 'primary' })
+      if (keypairChoice === 'generate') await deleteKeypair('pending-onboarding')
+      setRestoredRegistration(existingRegistration)
+      setPrivateKeyPem('')
+      setPendingIdentity({
         fingerprint: result.fingerprint,
         handle: result.handle,
+        registryUrl: registryBase,
         publicKeySpki: record.publicKeySpki,
         privateKey: record.privateKey,
       })
@@ -123,16 +169,16 @@ export default React.memo(function Onboarding({ onComplete }: Props) {
     }
   }
 
-  const canContinueStep1 = keypairChoice !== null
-  const canContinueStep2 = handle.length >= 1 && (handleStatus === 'available' || handleStatus === 'idle')
+  const canContinueStep1 = keypairChoice === 'generate' || (keypairChoice === 'stored' && storedKey !== null) || (keypairChoice === 'import' && privateKeyPem.trim().length > 0)
+  const canContinueStep2 = registryBase !== null && (restoring || (handle.length >= 1 && handleStatus === 'available')) && (!recoveryEmail.trim() || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recoveryEmail.trim()))
 
   return (
     <div
-      className="min-h-screen flex items-center justify-center px-4"
+      className="h-full overflow-y-auto flex flex-col px-4 py-8"
       style={{ background: '#000', fontFamily: 'Space Grotesk, sans-serif' }}
     >
       <div
-        className="w-full"
+        className="w-full my-auto mx-auto shrink-0"
         style={{
           maxWidth: 600,
           background: 'rgba(255,255,255,0.025)',
@@ -149,14 +195,15 @@ export default React.memo(function Onboarding({ onComplete }: Props) {
         {/* Step 1 — Choose keypair method */}
         {step === 1 && (
           <div style={{ animation: 'sgStep 0.3s ease both' }}>
-            <h2 className="font-bold text-center mb-2" style={{ fontSize: 22 }}>Establish Your Identity</h2>
+            <h2 className="font-bold text-center mb-2" style={{ fontSize: 22 }}>{restoring ? 'Restore Your Identity' : 'Establish Your Identity'}</h2>
             <p className="text-center mb-8" style={{ fontSize: 14, color: 'rgba(255,255,255,0.45)', lineHeight: 1.6 }}>
-              Your private key will be generated in your browser and stored only on this device. It never touches a server.
+              Your private key stays on this device. Generate a new key or import an existing PKCS#8 PEM backup.
             </p>
 
             <div className="grid grid-cols-2 gap-4 mb-6">
               {/* Generate card */}
               <button
+                disabled={restoreMode}
                 onClick={() => setKeypairChoice('generate')}
                 className="relative rounded-2xl p-5 text-left transition-all"
                 style={{
@@ -181,7 +228,7 @@ export default React.memo(function Onboarding({ onComplete }: Props) {
                 </div>
                 <div className="font-semibold mb-1" style={{ fontSize: 14 }}>Generate New Keypair</div>
                 <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.4)', lineHeight: 1.5 }}>
-                  Create a fresh cryptographic identity. Takes under a second.
+                  Create a fresh cryptographic identity in your browser.
                 </div>
               </button>
 
@@ -206,31 +253,37 @@ export default React.memo(function Onboarding({ onComplete }: Props) {
                 </div>
                 <div className="font-semibold mb-1" style={{ fontSize: 14 }}>Import Existing Keypair</div>
                 <div style={{ fontSize: 12.5, color: 'rgba(255,255,255,0.4)', lineHeight: 1.5 }}>
-                  Paste or upload a PEM private key from another device or backup.
+                  Paste a PKCS#8 PEM private key from your backup.
                 </div>
               </button>
             </div>
 
+            {storedKey && <button
+              onClick={() => setKeypairChoice('stored')}
+              className="w-full rounded-xl border border-white/15 p-3 text-sm text-left mb-5"
+              style={{ color: keypairChoice === 'stored' ? '#d6b06a' : 'rgba(255,255,255,0.65)' }}
+            >Restore the key stored in this browser</button>}
+            {keypairChoice === 'generate' && storedKey && <p className="text-xs text-amber-200/70 mb-4">A key already exists in this browser. Restore it to keep that identity. Generating a new identity replaces it only after registration succeeds.</p>}
+
             {keypairChoice === 'import' && (
-              <div className="mb-5 rounded-xl p-4" style={{ background: 'rgba(251,191,36,0.06)', border: '1px solid rgba(251,191,36,0.2)' }}>
-                <p style={{ fontSize: 12.5, color: 'rgba(251,191,36,0.75)', lineHeight: 1.5 }}>
-                  Key import is not yet available in the browser client. Please generate a new keypair or use the desktop app to import an existing key.
-                </p>
+              <div className="mb-5">
+                <label htmlFor="private-key" className="block text-xs text-white/50 mb-2">Private key (PKCS#8 PEM)</label>
+                <textarea id="private-key" value={privateKeyPem} onChange={e => setPrivateKeyPem(e.target.value)} rows={5} spellCheck={false} autoComplete="off" className="w-full rounded-xl p-3 bg-white/5 border border-white/10 text-xs font-mono" placeholder="-----BEGIN PRIVATE KEY-----" />
               </div>
             )}
 
             <p className="text-center mb-6" style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.25)' }}>
-              RSA-4096 · Generated using your browser's Web Crypto API · Non-extractable private key stored in IndexedDB
+              Generated keys use RSA-4096. Private keys are stored as non-extractable keys in IndexedDB.
             </p>
 
             <button
-              onClick={() => keypairChoice === 'import' ? undefined : setStep(2)}
-              disabled={!canContinueStep1 || keypairChoice === 'import'}
+              onClick={() => setStep(2)}
+              disabled={!canContinueStep1}
               className="w-full py-3 font-semibold text-sm text-black rounded-xl transition-all"
               style={{
                 background: '#d6b06a',
-                opacity: canContinueStep1 && keypairChoice !== 'import' ? 1 : 0.45,
-                cursor: canContinueStep1 && keypairChoice !== 'import' ? 'pointer' : 'default',
+                opacity: canContinueStep1 ? 1 : 0.45,
+                cursor: canContinueStep1 ? 'pointer' : 'default',
               }}
             >
               CONTINUE →
@@ -246,20 +299,33 @@ export default React.memo(function Onboarding({ onComplete }: Props) {
               A registry endorses your public key. It is your identity provider. You can add more later.
             </p>
 
-            {/* Registry URL (display-only for now — API module uses env var) */}
+            {/* Registry URL */}
             <div className="mb-4">
-              <label style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase', letterSpacing: '0.1em', display: 'block', marginBottom: 8 }}>
+              <label htmlFor="registry-url" style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase', letterSpacing: '0.1em', display: 'block', marginBottom: 8 }}>
                 Registry URL
               </label>
-              <div
-                className="flex items-center px-4 py-2.5 rounded-xl text-sm"
-                style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', color: 'rgba(255,255,255,0.5)', fontFamily: 'JetBrains Mono, monospace' }}
-              >
-                <span className="flex-1">{REGISTRY_URL}</span>
-                <span style={{ fontSize: 11, color: 'rgba(74,222,128,0.7)' }}>✓ default</span>
-              </div>
+              <input
+                id="registry-url"
+                type="url"
+                placeholder="https://registry.example.com"
+                value={registryUrl}
+                disabled={loading}
+                onChange={e => { setRegistryUrl(e.target.value); setHandleStatus('idle'); setError('') }}
+                aria-describedby="registry-url-help"
+                aria-invalid={registryUrl.trim() !== '' && !registryBase}
+                className="w-full text-sm outline-none rounded-xl px-4 py-2.5"
+                style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', color: '#f4f1ea', fontFamily: 'JetBrains Mono, monospace' }}
+                onFocus={e => (e.currentTarget.style.borderColor = 'rgba(214,176,106,0.4)')}
+                onBlur={e => (e.currentTarget.style.borderColor = 'rgba(255,255,255,0.1)')}
+              />
+              <p id="registry-url-help" style={{ marginTop: 6, fontSize: 12, color: 'rgba(255,255,255,0.4)' }}>
+                {registryUrl.trim() && !registryBase
+                  ? 'Use an HTTPS registry URL without credentials, a query, or a fragment. HTTP is allowed on localhost for development.'
+                  : 'Choose any registry. The suggested URL is editable.'}
+              </p>
             </div>
 
+            {!restoring && <>
             {/* Handle */}
             <div className="mb-4">
               <label style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase', letterSpacing: '0.1em', display: 'block', marginBottom: 8 }}>
@@ -275,8 +341,10 @@ export default React.memo(function Onboarding({ onComplete }: Props) {
                 <input
                   type="text"
                   placeholder="yourhandle"
+                  disabled={loading}
+                  aria-label="Handle"
                   value={handle}
-                  onChange={e => setHandle(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, ''))}
+                  onChange={e => { setHandle(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, '')); setHandleStatus('idle') }}
                   className="w-full text-sm outline-none rounded-xl py-2.5 pr-4"
                   style={{
                     paddingLeft: 26,
@@ -290,6 +358,7 @@ export default React.memo(function Onboarding({ onComplete }: Props) {
               </div>
               {handle && (
                 <div style={{ marginTop: 6, fontSize: 12 }}>
+                  {handleStatus === 'error' && <span className="text-red-300">Could not check availability. <button onClick={() => setAvailabilityAttempt(value => value + 1)} className="underline">Retry</button> or check the registry URL.</span>}
                   {handleStatus === 'checking' && <span style={{ color: 'rgba(255,255,255,0.3)' }}>Checking availability…</span>}
                   {handleStatus === 'available' && <span style={{ color: 'rgba(74,222,128,0.8)' }}>Available ✓</span>}
                   {handleStatus === 'taken' && <span style={{ color: 'rgba(251,191,36,0.8)' }}>Taken on this registry</span>}
@@ -297,7 +366,7 @@ export default React.memo(function Onboarding({ onComplete }: Props) {
               )}
               {handle && (
                 <div style={{ marginTop: 6, fontSize: 11.5, color: 'rgba(255,255,255,0.25)', fontFamily: 'JetBrains Mono, monospace' }}>
-                  @{handle}@{REGISTRY_URL}
+                  @{handle}@{registryBase ? new URL(registryBase).host : ''}
                 </div>
               )}
             </div>
@@ -310,6 +379,8 @@ export default React.memo(function Onboarding({ onComplete }: Props) {
               <input
                 type="text"
                 placeholder="Your Name"
+                disabled={loading}
+                aria-label="Display name"
                 value={displayName}
                 onChange={e => setDisplayName(e.target.value)}
                 className="w-full text-sm outline-none rounded-xl px-4 py-2.5"
@@ -336,6 +407,8 @@ export default React.memo(function Onboarding({ onComplete }: Props) {
                   <input
                     type="email"
                     placeholder="you@example.com"
+                    disabled={loading}
+                    aria-label="Recovery email"
                     value={recoveryEmail}
                     onChange={e => setRecoveryEmail(e.target.value)}
                     className="w-full text-sm outline-none rounded-xl px-4 py-2.5 mb-2"
@@ -344,12 +417,16 @@ export default React.memo(function Onboarding({ onComplete }: Props) {
                     onBlur={e => (e.currentTarget.style.borderColor = 'rgba(255,255,255,0.1)')}
                   />
                   <p style={{ fontSize: 12, color: 'rgba(255,255,255,0.3)', lineHeight: 1.5 }}>
-                    Your email is hashed before storage. We never see it. It can only be used to revoke your key if your device is lost.
+                    {recoveryEmail.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recoveryEmail.trim()) && <span className="block text-red-300">Enter a valid email address.</span>}
+                    Only a SHA-256 hash of your email is sent to the registry. Recovery requires support from your registry operator.
                   </p>
                 </div>
               )}
             </div>
 
+            </>}
+
+            <button onClick={() => setStep(1)} disabled={loading} className="text-sm text-white/50 mb-4">← Back</button>
             {error && (
               <div className="mb-4 rounded-xl px-4 py-3" style={{ background: 'rgba(248,113,113,0.08)', border: '1px solid rgba(248,113,113,0.2)', fontSize: 13, color: 'rgba(248,113,113,0.85)' }}>
                 {error}
@@ -362,7 +439,7 @@ export default React.memo(function Onboarding({ onComplete }: Props) {
               className="w-full py-3 font-semibold text-sm text-black rounded-xl transition-all"
               style={{ background: '#d6b06a', opacity: canContinueStep2 && !loading ? 1 : 0.45 }}
             >
-              {loading ? 'Creating identity…' : 'CONTINUE →'}
+              {loading ? (restoring ? 'Restoring identity…' : 'Creating identity…') : 'CONTINUE →'}
             </button>
           </div>
         )}
@@ -397,11 +474,12 @@ export default React.memo(function Onboarding({ onComplete }: Props) {
               </svg>
             </div>
 
-            <h2 className="font-bold text-center mb-1" style={{ fontSize: 22 }}>Identity Created</h2>
+            <h2 className="font-bold text-center mb-1" style={{ fontSize: 22 }}>{restoredRegistration ? 'Identity Restored' : 'Identity Created'}</h2>
             <p className="text-center mb-7" style={{ fontSize: 14, color: 'rgba(255,255,255,0.4)' }}>
               Your cryptographic identity is ready.
             </p>
 
+            {error && <p role="alert" className="text-sm text-red-300 mb-3">{error}</p>}
             {/* Summary card */}
             <div
               className="rounded-xl p-4 mb-6"
@@ -410,8 +488,8 @@ export default React.memo(function Onboarding({ onComplete }: Props) {
               {[
                 { label: 'Fingerprint', value: summary.fingerprint.slice(0, 32) + '…', mono: true },
                 { label: 'Handle', value: summary.handle, mono: true },
-                { label: 'Registry', value: REGISTRY_URL + ' ✓', mono: true },
-                { label: 'Key Strength', value: 'RSA-4096', mono: false },
+                { label: 'Registry', value: registryBase + ' ✓', mono: true },
+                { label: 'Key Strength', value: `RSA-${(pendingIdentity?.privateKey.algorithm as RsaKeyAlgorithm | undefined)?.modulusLength ?? ''}`, mono: false },
               ].map(({ label, value, mono }) => (
                 <div
                   key={label}
@@ -435,21 +513,15 @@ export default React.memo(function Onboarding({ onComplete }: Props) {
             </div>
 
             <p style={{ fontSize: 12, color: 'rgba(255,255,255,0.3)', textAlign: 'center', marginBottom: 20, lineHeight: 1.5 }}>
-              Your private key is stored in your browser's secure storage. Back it up if you want to use SIGIL on another device.
+              Your private key is stored only in this browser and cannot be exported. Keep any original PEM backup safe. Clearing browser data removes access on this device.
             </p>
 
-            {/* Export key button (non-functional — keys are non-extractable) */}
             <button
-              disabled
-              className="w-full py-2 rounded-xl text-sm mb-3 font-medium disabled:opacity-30 disabled:cursor-not-allowed"
-              style={{ border: '1px solid rgba(255,255,255,0.15)', color: 'rgba(255,255,255,0.5)' }}
-              title="Non-extractable keys cannot be exported from the browser"
-            >
-              Export Private Key (PEM)
-            </button>
-
-            <button
-              onClick={onComplete}
+              onClick={() => {
+                if (!pendingIdentity) return
+                try { setIdentity(pendingIdentity); onComplete() }
+                catch { setError('Could not save identity in this browser. Enable local storage and retry.') }
+              }}
               className="w-full py-3 font-semibold text-sm text-black rounded-xl transition-all"
               style={{ background: '#d6b06a' }}
               onMouseEnter={e => (e.currentTarget.style.background = '#e3c485')}

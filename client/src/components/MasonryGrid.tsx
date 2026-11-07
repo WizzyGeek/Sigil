@@ -4,13 +4,15 @@ import NoteCard from './NoteCard'
 
 interface Props {
   notes: Note[]
+  onReply: (note: Note) => void
+  emptyMessage: string
 }
 
-export default React.memo(function NoteList({ notes }: Props) {
+export default React.memo(function NoteList({ notes, onReply, emptyMessage }: Props) {
   if (notes.length === 0) {
     return (
       <div className="flex items-center justify-center h-full text-white/20 text-sm">
-        No notes yet — subscribe to a channel and start writing.
+        {emptyMessage}
       </div>
     )
   }
@@ -18,7 +20,7 @@ export default React.memo(function NoteList({ notes }: Props) {
   return (
     <div>
       {notes.map(note => (
-        <NoteCard key={note.jti} note={note} />
+        <NoteCard key={note.jti} note={note} onReply={onReply} />
       ))}
     </div>
   )

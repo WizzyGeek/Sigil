@@ -1,13 +1,14 @@
-"""POST /stake — issue a signed stake JWT for a registered identity."""
+"""POST /stake — issue a signed stake frame for a registered identity."""
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from ..auth import verify_client_signature
 from ..crypto import mint_stake
 from ..db import get_pool
+from ..domain import registry_domain
 
 router = APIRouter()
 
@@ -23,7 +24,7 @@ class StakeResponse(BaseModel):
 
 
 @router.post("/stake", response_model=StakeResponse)
-async def issue_stake(body: StakeRequest) -> StakeResponse:
+async def issue_stake(body: StakeRequest, request: Request) -> StakeResponse:
     pool = get_pool()
 
     async with pool.connection() as conn:
@@ -49,5 +50,5 @@ async def issue_stake(body: StakeRequest) -> StakeResponse:
         public_key_pem, user_tag, display_name = identity
         verify_client_signature(public_key_pem, body.nonce, body.signature)
 
-    stake = mint_stake(user_tag, public_key_pem, display_name)
+    stake = mint_stake(user_tag, public_key_pem, display_name, registry_domain=registry_domain(request))
     return StakeResponse(stake=stake)

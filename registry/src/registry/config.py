@@ -11,7 +11,8 @@ class Settings(BaseSettings):
     database_url: str = "postgresql://sigil:sigil@localhost:5432/sigil"
     registry_private_key_pem: str = ""
     registry_public_key_pem: str = ""
-    registry_domain: str = "localhost:8000"
+    registry_domain: str = ""
+    forwarded_allow_ips: str = "127.0.0.1,::1"
 
     email_smtp_host: str = ""
     email_smtp_port: int = 587

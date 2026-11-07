@@ -9,7 +9,7 @@ FROM base AS dev
 ENV PYTHONPATH=/app/src
 # source mounted as volume by compose; --reload watches for changes
 CMD ["uvicorn", "registry.main:app", \
-     "--host", "0.0.0.0", "--port", "8000", \
+     "--host", "0.0.0.0", "--port", "8000", "--no-proxy-headers", \
      "--reload", "--reload-dir", "/app/src"]
 
 # ── prod ──────────────────────────────────────────────────────────────────────
@@ -20,5 +20,5 @@ RUN adduser --disabled-password --gecos "" appuser \
  && chown -R appuser /app
 USER appuser
 CMD ["uvicorn", "registry.main:app", \
-     "--host", "0.0.0.0", "--port", "8000", \
+     "--host", "0.0.0.0", "--port", "8000", "--no-proxy-headers", \
      "--workers", "2"]

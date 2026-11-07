@@ -4,7 +4,7 @@ const DB_NAME = 'sigil-keystore'
 const DB_VERSION = 1
 const STORE = 'keys'
 
-interface KeyRecord {
+export interface KeyRecord {
   id: string
   privateKey: CryptoKey      // non-extractable
   publicKeySpki: ArrayBuffer // exported SPKI for sharing
@@ -23,8 +23,8 @@ async function db(): Promise<IDBPDatabase> {
   return _db
 }
 
-/** Generate and persist a new RSA-2048 keypair. Returns the record id. */
-export async function generateAndStoreKeypair(id = 'primary'): Promise<KeyRecord> {
+/** Generate a non-extractable RSA keypair without replacing a stored identity. */
+export async function generateKeypair(id = 'primary'): Promise<KeyRecord> {
   const { privateKey, publicKey } = await crypto.subtle.generateKey(
     {
       name: 'RSASSA-PKCS1-v1_5',
@@ -37,9 +37,13 @@ export async function generateAndStoreKeypair(id = 'primary'): Promise<KeyRecord
   )
 
   const publicKeySpki = await crypto.subtle.exportKey('spki', publicKey)
-  const record: KeyRecord = { id, privateKey, publicKeySpki }
-  const store = await db()
-  await store.put(STORE, record)
+  return { id, privateKey, publicKeySpki }
+}
+
+/** Generate and persist under an explicitly chosen record id. */
+export async function generateAndStoreKeypair(id = 'primary'): Promise<KeyRecord> {
+  const record = await generateKeypair(id)
+  await storeKeypair(record)
   return record
 }
 
@@ -53,4 +57,20 @@ export async function loadKeypair(id = 'primary'): Promise<KeyRecord | null> {
 export async function deleteKeypair(id = 'primary'): Promise<void> {
   const store = await db()
   await store.delete(STORE, id)
+}
+
+/** Import a PKCS#8 PEM backup; persist its private key as non-extractable. */
+export async function importKeypair(pem: string): Promise<KeyRecord> {
+  if (!pem.includes('-----BEGIN PRIVATE KEY-----')) throw new Error('Use an unencrypted PKCS#8 PEM key (BEGIN PRIVATE KEY).')
+  const der = Uint8Array.from(atob(pem.replace(/-----[^-]+-----/g, '').replace(/\s/g, '')), c => c.charCodeAt(0))
+  const algorithm = { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }
+  const temporary = await crypto.subtle.importKey('pkcs8', der, algorithm, true, ['sign'])
+  const jwk = await crypto.subtle.exportKey('jwk', temporary)
+  const publicKey = await crypto.subtle.importKey('jwk', { kty: jwk.kty, n: jwk.n, e: jwk.e, alg: jwk.alg, ext: true }, algorithm, true, ['verify'])
+  const privateKey = await crypto.subtle.importKey('pkcs8', der, algorithm, false, ['sign'])
+  return { id: 'primary', privateKey, publicKeySpki: await crypto.subtle.exportKey('spki', publicKey) }
+}
+
+export async function storeKeypair(record: KeyRecord): Promise<void> {
+  await (await db()).put(STORE, record)
 }

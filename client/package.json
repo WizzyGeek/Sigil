@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --import ./test/register.mjs test/client.test.mjs && node --import ./test/register.mjs test/history.test.mjs"
   },
   "dependencies": {
     "idb": "^8.0.3",
