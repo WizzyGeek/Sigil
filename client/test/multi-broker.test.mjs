@@ -89,3 +89,46 @@ test('legacy single-broker preferences migrate and multiple brokers survive relo
  savePreferences('new',reloaded)
  assert.deepEqual(loadPreferences('new').brokerUrls,[],'explicit disconnect restored a deployment default')
 })
+
+test('broker R/P permissions control sockets, incoming traffic, note publishing and history replies',t=>{
+ const sockets=fakeSockets(t),received=[]
+ const pool=new BrokerPool({onFrame:(url,frame)=>received.push({url,frame}),onChange:()=>{},onError:assert.fail})
+ t.after(()=>pool.close())
+ const one='wss://one.test/ws',two='wss://two.test/ws',three='wss://three.test/ws'
+ pool.updateBrokers([{url:one,read:true,publish:false},{url:two,read:false,publish:true},{url:three,read:false,publish:false}])
+ assert.equal(sockets.length,2)
+ sockets.forEach(socket=>socket.open())
+ const note=[{type:'note',jti:'one'},'sig'],request=[{type:'request_notes',jti:'request'},'sig'],reply=[{type:'note_relay'},'sig']
+ sockets[0].receive(note);sockets[1].receive(note)
+ assert.equal(received.length,1,'publish-only broker delivered incoming notes')
+ assert.equal(received[0].url,one)
+ assert.deepEqual(pool.publish(note),{sent:1,failed:[]})
+ assert.equal(sockets[0].sent.length,0,'read-only broker received an authored note')
+ assert.deepEqual(sockets[1].sent,[note])
+ assert.throws(()=>pool.sendTo(one,reply),/Publishing is disabled/)
+ pool.sendTo(one,request)
+ assert.throws(()=>pool.sendTo(two,request),/Reading is disabled/)
+ pool.updateBrokers([{url:one,read:true,publish:true},{url:two,read:false,publish:false}])
+ assert.equal(sockets.length,2,'publish toggle unnecessarily reconnected the read socket')
+ assert.equal(sockets[1].readyState,3,'neither enabled should disconnect')
+ pool.sendTo(one,reply)
+ pool.updateBrokers([{url:one,read:false,publish:true}])
+ assert.equal(sockets[0].readyState,3,'read toggle must clear existing broker subscriptions')
+ assert.equal(sockets.length,3)
+ sockets[2].open()
+ sockets[0].receive(note);sockets[2].receive(note)
+ assert.equal(received.length,1,'disabled or stale read socket delivered a frame')
+ pool.updateBrokers([{url:one,read:true,publish:false}])
+ sockets[3].open()
+ assert.throws(()=>pool.publish(note),/publish-enabled broker/)
+})
+
+test('broker read/publish choices persist per identity without changing another identity',()=>{
+ storage.clear()
+ const defaults=loadPreferences('first')
+ const url='wss://one.test/ws'
+ savePreferences('first',{...defaults,brokerUrls:[url],brokerAccess:{[url]:{read:true,publish:false}}})
+ savePreferences('second',{...defaults,brokerUrls:[url],brokerAccess:{[url]:{read:false,publish:true}}})
+ assert.deepEqual(loadPreferences('first').brokerAccess[url],{read:true,publish:false})
+ assert.deepEqual(loadPreferences('second').brokerAccess[url],{read:false,publish:true})
+})

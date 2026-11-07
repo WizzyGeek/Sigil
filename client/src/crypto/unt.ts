@@ -39,9 +39,9 @@ export async function buildUnt(
   return signFrame(payload as unknown as Record<string, unknown>, privateKey)
 }
 
-/** Build and sign a control UNT (subscribe / unsubscribe / request_notes / note_relay). */
+/** Build and sign a control UNT (subscribe / unsubscribe / request_notes / request_note / note_relay). */
 export async function buildCommand(
-  type: 'subscribe' | 'unsubscribe' | 'request_notes' | 'note_relay',
+  type: 'subscribe' | 'unsubscribe' | 'request_notes' | 'request_note' | 'note_relay',
   channel: string,
   stake: StakeFrame,
   privateKey: CryptoKey,
@@ -99,6 +99,7 @@ export async function verifyUnt(frame: UNTFrame, registryKeys: RegistryKeyring):
     authorFp,
     registry: inner.iss,
     issuedAt: outer.iat,
+    stakeIssuedAt: inner.iat,
     freshnessScore: computeFreshnessScore(outer.iat - inner.iat),
     raw: JSON.stringify(frame),
   }

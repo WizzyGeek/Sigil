@@ -118,6 +118,7 @@ test('imported PEM stays non-extractable and signed notes preserve replies and d
   assert.equal(note.displayName, 'Alice Example')
   assert.equal(note.channel, 'chosen-channel')
   assert.equal(note.authorFp, 'sha256:' + await fingerprintFromSpki(record.publicKeySpki))
+  assert.equal(note.stakeIssuedAt, claims.iat)
   frame[0].reply_to = 'tampered'
   await assert.rejects(verifyUnt(frame, keys), /signature invalid/)
   assert.equal(await hashEmail(' ALICE@example.com '), await hashEmail('alice@example.com'))
@@ -200,4 +201,16 @@ test('new key generation is non-extractable and does not require or overwrite In
   assert.equal(record.privateKey.extractable, false)
   assert.equal(record.privateKey.algorithm.modulusLength, 4096)
   assert.ok(record.publicKeySpki.byteLength > 0)
+})
+
+test('note metadata displays exact stake age rather than a categorical score or note age', async()=>{
+ const {formatDuration,freshnessLabel,issuedAtLabel}=await import('../src/components/noteMetadata.ts')
+ assert.equal(formatDuration(0,true),'0s')
+ assert.equal(formatDuration(12),'12 seconds')
+ assert.equal(formatDuration(130,true),'2m 10s')
+ assert.equal(formatDuration(90061),'1 day 1 hour 1 minute 1 second')
+ assert.equal(freshnessLabel({issuedAt:1700000130,stakeIssuedAt:1700000000}),'2 minutes 10 seconds')
+ assert.equal(freshnessLabel({issuedAt:100,stakeIssuedAt:105}),'Stake issued 5 seconds after note')
+ assert.equal(freshnessLabel({issuedAt:100}),'Unavailable')
+ assert.equal(issuedAtLabel(Number.NaN),'Unavailable')
 })

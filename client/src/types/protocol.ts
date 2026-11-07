@@ -10,13 +10,15 @@ export interface HistoryCursor { iat: number; jti: string }
 export interface UNTOuterClaims {
   jti: string
   iat: number
-  type: 'note' | 'subscribe' | 'unsubscribe' | 'request_notes' | 'note_relay'
+  type: 'note' | 'subscribe' | 'unsubscribe' | 'request_notes' | 'request_note' | 'note_relay'
   channel: string
   stake: StakeFrame   // nested [stake_payload, sig_b64]
   stake_iat: number   // MUST equal stake[0].iat — bound into outer signature
   // note-only:
   content?: string
   reply_to?: string | null
+  // request_note and its note_relay response: exact original JTI, no pagination.
+  note_jti?: string
   // request_notes-only:
   before?: HistoryCursor // strict (iat, jti) cursor for same-second pagination
   till?: number       // fetch notes with iat < till (defaults to now)
@@ -51,6 +53,7 @@ export interface Note {
   authorFp: string      // sha256:hex fingerprint
   registry: string
   issuedAt: number
+  stakeIssuedAt: number  // registry-signed endorsement time, for exact freshness display
   freshnessScore: FreshnessScore
   raw: string           // JSON.stringify of the original UNTFrame
 }

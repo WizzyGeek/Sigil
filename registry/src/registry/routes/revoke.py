@@ -60,6 +60,7 @@ async def revoke_key(body: RevokeRequest) -> dict:
         await conn.execute(
             "DELETE FROM key_registry WHERE fingerprint = %s", (body.fingerprint,)
         )
+        await conn.execute("DELETE FROM nonces WHERE fingerprint = %s", (body.fingerprint,))
 
     return {"revoked": True}
 

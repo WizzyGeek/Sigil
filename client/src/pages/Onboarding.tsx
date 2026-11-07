@@ -1,8 +1,12 @@
 import React, { useState, useEffect } from 'react'
-import { generateAndStoreKeypair, importKeypair, loadKeypair, storeKeypair, deleteKeypair, type KeyRecord } from '../crypto/keystore'
+import { importKeypair, loadKeypair, loadIdentityKey, storeKeypair, deleteKeypair, type KeyRecord } from '../crypto/keystore'
 import { fingerprintFromSpki, hashEmail } from '../crypto/fingerprint'
 import { requestChallenge, register, requestStake, fetchRegistryPublicKey, isHandleAvailable, lookupKey, RegistryError } from '../api/registry'
 import { useIdentity, type Identity } from '../store/identity'
+import DeleteLocalKeys from '../components/DeleteLocalKeys'
+import { withIdentityLock } from '../crypto/keyLifecycle'
+import EndpointInput from '../components/EndpointInput'
+import { useKeyGeneration } from '../components/KeyGeneration'
 import { useSearchParams } from 'react-router-dom'
 import { config, normalizeUrl } from '../config'
 import { importPublicKeyPem } from '../crypto/jwt'
@@ -53,6 +57,7 @@ function StepIndicator({ current }: { current: Step }) {
 }
 
 export default React.memo(function Onboarding({ onComplete }: Props) {
+  const generateKey = useKeyGeneration()
   const [params] = useSearchParams()
   const restoreMode = params.get('mode') === 'signin'
   const [privateKeyPem, setPrivateKeyPem] = useState('')
@@ -108,10 +113,12 @@ export default React.memo(function Onboarding({ onComplete }: Props) {
     setError('')
     setLoading(true)
     try {
+      await withIdentityLock(async () => {
       const record = keypairChoice === 'stored' ? storedKey : keypairChoice === 'import'
         ? await importKeypair(privateKeyPem)
-        : await loadKeypair('pending-onboarding') ?? await generateAndStoreKeypair('pending-onboarding')
+        : await loadKeypair('pending-onboarding') ?? await generateKey('pending-onboarding', `@${handle}@${new URL(registryBase).host}`)
       if (!record) throw new Error('No key is available in this browser. Import a PEM backup instead.')
+      if (keypairChoice === 'generate') await storeKeypair(record)
       const fp = await fingerprintFromSpki(record.publicKeySpki)
 
       const spkiB64 = btoa(String.fromCharCode(...new Uint8Array(record.publicKeySpki)))
@@ -148,7 +155,7 @@ export default React.memo(function Onboarding({ onComplete }: Props) {
       }
       if (result.fingerprint !== fp) throw new Error('Registry returned a different key fingerprint.')
       if (typeof result.handle !== 'string' || !result.handle.toLowerCase().endsWith('@' + new URL(registryBase).host.toLowerCase())) throw new Error('Registry returned a handle for a different issuer.')
-      await storeKeypair({ ...record, id: 'primary' })
+      await storeKeypair({ ...record, id: 'primary', identityMetadata: { ...result, registryUrl: registryBase } })
       if (keypairChoice === 'generate') await deleteKeypair('pending-onboarding')
       setRestoredRegistration(existingRegistration)
       setPrivateKeyPem('')
@@ -162,6 +169,7 @@ export default React.memo(function Onboarding({ onComplete }: Props) {
 
       setSummary(result)
       setStep(3)
+      })
     } catch (e) {
       setError((e as Error).message)
     } finally {
@@ -263,8 +271,9 @@ export default React.memo(function Onboarding({ onComplete }: Props) {
               className="w-full rounded-xl border border-white/15 p-3 text-sm text-left mb-5"
               style={{ color: keypairChoice === 'stored' ? '#d6b06a' : 'rgba(255,255,255,0.65)' }}
             >Restore the key stored in this browser</button>}
-            {keypairChoice === 'generate' && storedKey && <p className="text-xs text-amber-200/70 mb-4">A key already exists in this browser. Restore it to keep that identity. Generating a new identity replaces it only after registration succeeds.</p>}
+            {keypairChoice === 'generate' && storedKey && <p className="text-xs text-amber-200/70 mb-4">A key already exists in this browser. Restore it to keep that identity. Generating another identity keeps this key available in the identity menu.</p>}
 
+            <DeleteLocalKeys disabled={loading} />
             {keypairChoice === 'import' && (
               <div className="mb-5">
                 <label htmlFor="private-key" className="block text-xs text-white/50 mb-2">Private key (PKCS#8 PEM)</label>
@@ -273,7 +282,7 @@ export default React.memo(function Onboarding({ onComplete }: Props) {
             )}
 
             <p className="text-center mb-6" style={{ fontSize: 11.5, color: 'rgba(255,255,255,0.25)' }}>
-              Generated keys use RSA-4096. Private keys are stored as non-extractable keys in IndexedDB.
+              Generated keys use RSA-4096. You will see the private key once for backup before it is stored as a non-exportable signing key.
             </p>
 
             <button
@@ -304,13 +313,15 @@ export default React.memo(function Onboarding({ onComplete }: Props) {
               <label htmlFor="registry-url" style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase', letterSpacing: '0.1em', display: 'block', marginBottom: 8 }}>
                 Registry URL
               </label>
-              <input
+              <EndpointInput
+                kind="registry"
+                discoveryRegistry={normalizeUrl(config.registryUrl, 'registry') ?? undefined}
                 id="registry-url"
                 type="url"
                 placeholder="https://registry.example.com"
                 value={registryUrl}
                 disabled={loading}
-                onChange={e => { setRegistryUrl(e.target.value); setHandleStatus('idle'); setError('') }}
+                onValueChange={value => { setRegistryUrl(value); setHandleStatus('idle'); setError('') }}
                 aria-describedby="registry-url-help"
                 aria-invalid={registryUrl.trim() !== '' && !registryBase}
                 className="w-full text-sm outline-none rounded-xl px-4 py-2.5"
@@ -517,10 +528,17 @@ export default React.memo(function Onboarding({ onComplete }: Props) {
             </p>
 
             <button
-              onClick={() => {
+              onClick={async () => {
                 if (!pendingIdentity) return
-                try { setIdentity(pendingIdentity); onComplete() }
-                catch { setError('Could not save identity in this browser. Enable local storage and retry.') }
+                try {
+                  await withIdentityLock(async () => {
+                    const record = await loadIdentityKey(pendingIdentity)
+                    if (!record) throw new Error('This identity was removed locally. Start again or import your PEM backup.')
+                    await setIdentity({ ...pendingIdentity, privateKey: record.privateKey, publicKeySpki: record.publicKeySpki })
+                    onComplete()
+                  })
+                }
+                catch (err) { setError((err as Error).message) }
               }}
               className="w-full py-3 font-semibold text-sm text-black rounded-xl transition-all"
               style={{ background: '#d6b06a' }}

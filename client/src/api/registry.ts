@@ -72,3 +72,27 @@ export async function isHandleAvailable(registryUrl: string, handle: string, sig
     throw new Error('Could not check handle availability. Try again.')
   }, signal)
 }
+
+export function requestRotationChallenge(fingerprint: string, registryUrl: string): Promise<{ nonce: string; expires_at: string }> {
+  return request(registryUrl, '/rotate/challenge', { fingerprint })
+}
+
+export function rotateKey(payload: { old_fingerprint: string; new_public_key: string; nonce: string; old_signature: string; new_signature: string }, registryUrl: string): Promise<{ new_fingerprint: string }> {
+  return request(registryUrl, '/rotate', payload)
+}
+
+export function revokeKey(payload: { fingerprint: string; nonce: string; signature: string }, registryUrl: string): Promise<{ revoked: boolean }> {
+  return request(registryUrl, '/revoke', payload)
+}
+
+export interface DiscoveryEntry { kind: 'registry' | 'broker'; url: string }
+export function discoverEndpoints(registryUrl: string, kind: DiscoveryEntry['kind'], query: string, signal?: AbortSignal): Promise<{ entries: DiscoveryEntry[] }> {
+  return response(registryUrl, `/discovery?${new URLSearchParams({ kind, query, limit: '8' })}`, {}, async res => {
+    if (!res.ok) throw new RegistryError('Endpoint suggestions are unavailable from this registry.', res.status)
+    return res.json()
+  }, signal)
+}
+export interface AdvertisementResult { advertised: number; accepted: DiscoveryEntry[]; rejected: (DiscoveryEntry & { reason: string })[] }
+export function advertiseEndpoints(registryUrl: string, payload: { fingerprint: string; nonce: string; signature: string; registries: string[]; brokers: string[] }): Promise<AdvertisementResult> {
+  return request(registryUrl, '/discovery/advertise', payload)
+}

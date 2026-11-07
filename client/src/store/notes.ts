@@ -68,3 +68,8 @@ export async function deleteNotesByAuthor(authorFp: string): Promise<void> {
   await Promise.all(all.filter(n => n.authorFp === authorFp).map(n => tx.store.delete(n.jti)))
   await tx.done
 }
+
+/** Primary-key lookup; callers must verify the stored original before use. */
+export async function getNoteByJti(jti: string): Promise<Note | undefined> {
+  return (await notesDb()).get(STORE, jti)
+}

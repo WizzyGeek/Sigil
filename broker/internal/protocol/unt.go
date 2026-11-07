@@ -25,6 +25,7 @@ type UNTClaims struct {
 	Content    string  `json:"content,omitempty"`
 	ReplyTo    *string `json:"reply_to,omitempty"`
 	StakeIat   int64   `json:"stake_iat"`
+	NoteJti    string  `json:"note_jti,omitempty"`
 	RequestJti string  `json:"request_jti,omitempty"`
 	To         string  `json:"to,omitempty"` // note_relay: unicast target fingerprint
 

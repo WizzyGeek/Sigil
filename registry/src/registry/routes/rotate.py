@@ -75,25 +75,42 @@ async def rotate_key(body: RotateRequest) -> RotateResponse:
             raise HTTPException(status_code=400, detail="Nonce expired")
 
         identity = await (await conn.execute(
-            "SELECT public_key, user_tag, display_name FROM key_registry WHERE fingerprint = %s",
+            "SELECT public_key, user_tag, display_name, registered_at FROM key_registry WHERE fingerprint = %s FOR UPDATE",
             (body.old_fingerprint,),
         )).fetchone()
         if identity is None:
             raise HTTPException(status_code=404, detail="Identity not found")
 
-        old_public_key, user_tag, display_name = identity
+        old_public_key, user_tag, display_name, registered_at = identity
 
         verify_client_signature(old_public_key, body.nonce, body.old_signature)
         verify_client_signature(body.new_public_key, body.nonce, body.new_signature)
 
         new_fp = fingerprint_from_pem(body.new_public_key)
+        if new_fp == body.old_fingerprint:
+            raise HTTPException(status_code=400, detail="Replacement key must be different")
+        recovery = await (await conn.execute(
+            "SELECT email_hash FROM recovery_hints WHERE fingerprint = %s", (body.old_fingerprint,)
+        )).fetchone()
+        conflict = await (await conn.execute(
+            "SELECT 1 FROM key_registry WHERE fingerprint = %s", (new_fp,)
+        )).fetchone()
+        if conflict:
+            raise HTTPException(status_code=409, detail="Replacement key is already registered")
 
         await conn.execute(
             "DELETE FROM key_registry WHERE fingerprint = %s", (body.old_fingerprint,)
         )
         await conn.execute(
-            "INSERT INTO key_registry (fingerprint, public_key, user_tag, display_name) VALUES (%s, %s, %s, %s)",
-            (new_fp, body.new_public_key, user_tag, display_name),
+            "INSERT INTO key_registry (fingerprint, public_key, user_tag, display_name, registered_at) VALUES (%s, %s, %s, %s, %s)",
+            (new_fp, body.new_public_key, user_tag, display_name, registered_at),
         )
+
+        if recovery:
+            await conn.execute(
+                "INSERT INTO recovery_hints (fingerprint, email_hash) VALUES (%s, %s)",
+                (new_fp, recovery[0]),
+            )
+        await conn.execute("DELETE FROM nonces WHERE fingerprint = %s", (body.old_fingerprint,))
 
     return RotateResponse(new_fingerprint=new_fp)

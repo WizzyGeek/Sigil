@@ -19,16 +19,13 @@ function RedirectIfAuthed({ children }: { children: React.ReactNode }) {
 
 export default function App() {
   const navigate = useNavigate()
+  const { identity } = useIdentity()
 
   return (
     <Routes>
       <Route
         path="/"
-        element={
-          <RedirectIfAuthed>
-            <Landing />
-          </RedirectIfAuthed>
-        }
+        element={<Landing />}
       />
       <Route
         path="/onboarding"
@@ -42,7 +39,7 @@ export default function App() {
         path="/app"
         element={
           <RequireIdentity>
-            <AppPage />
+            <AppPage key={`${identity?.fingerprint}:${identity?.registryUrl}`} />
           </RequireIdentity>
         }
       />

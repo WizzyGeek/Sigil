@@ -124,7 +124,7 @@ func (h *Hub) handleMessage(env inboundEnvelope) {
 
 	// Stale broadcasts are dropped before identity bookkeeping or LRU access.
 	// A five-minute-old frame is allowed; anything older is not tracked at all.
-	if claims.Type == protocol.TypeNote || claims.Type == protocol.TypeRequestNotes {
+	if claims.Type == protocol.TypeNote || claims.Type == protocol.TypeRequestNotes || claims.Type == protocol.TypeRequestNote {
 		if claims.Jti == "" || claims.Iat < h.now().Add(-5*time.Minute).Unix() {
 			return
 		}
@@ -156,13 +156,19 @@ func (h *Hub) handleMessage(env inboundEnvelope) {
 			h.fanout(env.client, claims.Channel, env.data)
 		}
 
-	case protocol.TypeRequestNotes:
+	case protocol.TypeRequestNotes, protocol.TypeRequestNote:
+		if claims.Type == protocol.TypeRequestNote && (claims.NoteJti == "" || len(claims.NoteJti) > 256 || claims.Channel == "") {
+			return
+		}
 		if !h.seenJTIs.seen(claims.Jti) {
 			h.seenJTIs.rememberRequest(claims.Jti, env.client.id, h.now().Unix()+300)
 			h.fanout(env.client, claims.Channel, env.data)
 		}
 
 	case protocol.TypeNoteRelay:
+		if claims.NoteJti != "" && (len(claims.NoteJti) > 256 || claims.RequestJti == "" || claims.RelayCount != 1) {
+			return
+		}
 		if claims.RelayCount > h.maxRelayBatch {
 			log.Printf("note_relay batch too large from %s: %d (max %d)", env.client.id, claims.RelayCount, h.maxRelayBatch)
 			return

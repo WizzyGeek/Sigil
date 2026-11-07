@@ -1,3 +1,4 @@
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -13,6 +14,9 @@ class Settings(BaseSettings):
     registry_public_key_pem: str = ""
     registry_domain: str = ""
     forwarded_allow_ips: str = "127.0.0.1,::1"
+
+    discovery_recheck_interval_seconds: int = Field(default=21600, ge=0, le=31536000)
+    discovery_recheck_sample_size: int = Field(default=20, ge=1, le=1000)
 
     email_smtp_host: str = ""
     email_smtp_port: int = 587

@@ -26,7 +26,7 @@ export const config = {
   maxFrameBytes: positiveInteger(import.meta.env.VITE_MAX_FRAME_BYTES, 262144, 1024),
   historyTimeoutMs: positiveInteger(import.meta.env.VITE_HISTORY_TIMEOUT_MS, 5000, 500, 60000),
   historyBatchSize: positiveInteger(import.meta.env.VITE_HISTORY_BATCH_SIZE, 25, 1, 25),
-  repositoryUrl: (import.meta.env.VITE_REPOSITORY_URL as string | undefined) ?? '',
+  repositoryUrl: (import.meta.env.VITE_REPOSITORY_URL as string | undefined)?.trim() || 'https://github.com/WizzyGeek/Sigil',
 }
 
 export function normalizeUrl(value: string, kind: 'registry' | 'broker'): string | null {
