@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react'
 import { useIdentity } from '../store/identity'
-import { BrokerClient } from '../api/broker'
+import { BrokerPool } from '../api/brokerPool'
 import { saveNoteIfNew, getNotesByChannel, getHistoryPage } from '../store/notes'
 import { verifyUnt, buildUnt, buildCommand } from '../crypto/unt'
 import { importPublicKeyPem } from '../crypto/jwt'
@@ -10,7 +10,8 @@ import { fingerprintFromSpki } from '../crypto/fingerprint'
 import type { Note, UNTFrame, StakeFrame } from '../types/protocol'
 import Header from '../components/Header'
 import Sidebar, { type ChannelItem } from '../components/Sidebar'
-import NoteList from '../components/MasonryGrid'
+import NoteFeed from '../components/NoteFeed'
+import { mergeNotes } from '../store/feed'
 import BottomBar from '../components/BottomBar'
 import { createRegistryKeyring, registryIssuer, verifyStake, type RegistryKeyring } from '../crypto/registryTrust'
 import { config, normalizeUrl } from '../config'
@@ -23,23 +24,37 @@ export default React.memo(function AppPage() {
     const url = normalizeUrl(identity?.registryUrl ?? config.registryUrl, 'registry')
     return loadPreferences(identity!.fingerprint, url ? { url, handle: identity!.handle } : undefined)
   })
-  const { brokerUrl, registries: accounts, selectedRegistry, activeChannel } = preferences
+  const { brokerUrls, registries: accounts, selectedRegistry, activeChannel } = preferences
   const registries = accounts.map(account => account.url)
   const selectedAccount = accounts.find(account => account.url === selectedRegistry)
   const registryUrl = selectedRegistry
-  const [brokerDraft, setBrokerDraft] = useState(brokerUrl)
-  const [connected, setConnected] = useState(false)
+  const [brokerDraft, setBrokerDraft] = useState('')
+  const [connections, setConnections] = useState<Record<string, boolean>>({})
+  const connectedUrls = Object.keys(connections).filter(url => connections[url]).sort()
+  const connected = connectedUrls.length > 0
   const [unread, setUnread] = useState<Record<string, number>>({})
   const channels: ChannelItem[] = preferences.channels.map(name => ({ name, unread: unread[name] ?? 0 }))
   const [notes, setNotes] = useState<Note[]>([])
-  const [broker, setBroker] = useState<BrokerClient | null>(null)
   const [registryRefresh, setRegistryRefresh] = useState(0)
   const [registryKeys, setRegistryKeys] = useState<RegistryKeyring>(new Map())
   const registryKey = registryUrl ? registryKeys.get(registryIssuer(registryUrl)) : undefined
   const [error, setError] = useState('')
   const historyPeerId = useRef(crypto.randomUUID())
-  const history = useRef<PeerHistory | null>(null)
-  const [historyStatus, setHistoryStatus] = useState<HistoryStatus | null>(null)
+  const history = useRef(new Map<string, PeerHistory>())
+  const [historyStatuses, setHistoryStatuses] = useState<Record<string, HistoryStatus>>({})
+  const statusList = Object.values(historyStatuses)
+  const historyStatus = statusList.length ? {
+    phase: statusList.some(s => s.phase === 'syncing') ? 'syncing' : statusList.some(s => s.phase === 'incomplete') ? 'incomplete' : statusList.some(s => s.phase === 'synced') ? 'synced' : 'no-peers',
+    received: statusList.reduce((sum, s) => sum + s.received, 0),
+    skipped: statusList.reduce((sum, s) => sum + (s.skipped ?? 0), 0),
+  } : null
+  const [followToken, setFollowToken] = useState(0)
+  const handleFrameRef = useRef<(url: string, frame: UNTFrame) => Promise<void>>(async () => {})
+  const [brokers] = useState(() => new BrokerPool({
+    onFrame: (url, frame) => { void handleFrameRef.current(url, frame).catch(console.error) },
+    onChange: setConnections,
+    onError: error => setError(error.message),
+  }))
   const [replyTo, setReplyTo] = useState<Note | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const settingsRef = useRef<HTMLDivElement>(null)
@@ -118,37 +133,26 @@ export default React.memo(function AppPage() {
 
   const acceptNote = useCallback((note: Note) => {
     if (note.channel === activeChannelRef.current) {
-      setNotes(prev => prev.some(n => n.jti === note.jti) ? prev : [...prev, note].sort((a, b) => a.issuedAt - b.issuedAt || (a.jti < b.jti ? -1 : 1)))
+      setNotes(prev => mergeNotes(prev, [note]))
     } else {
       setUnread(prev => ({ ...prev, [note.channel]: (prev[note.channel] ?? 0) + 1 }))
     }
   }, [])
 
-  const handleFrame = useCallback(async (frame: UNTFrame) => {
+  const handleFrame = useCallback(async (url: string, frame: UNTFrame) => {
     const type = frame?.[0]?.type
     if (type === 'request_notes' || type === 'note_relay') {
-      await history.current?.handle(frame)
+      await history.current.get(url)?.handle(frame)
     } else if (type === 'note') {
       const note = await verifyNote(frame)
       if (await saveNoteIfNew(note)) acceptNote(note)
     }
   }, [verifyNote, acceptNote])
 
-  const handleFrameRef = useRef(handleFrame)
   useEffect(() => { handleFrameRef.current = handleFrame }, [handleFrame])
-
-  useEffect(() => {
-    setConnected(false)
-    setBroker(null)
-    if (!brokerUrl) return
-    try {
-      const client = new BrokerClient(brokerUrl, frame => { void handleFrameRef.current(frame).catch(console.error) }, setConnected)
-      setBroker(client)
-      return () => client.close()
-    } catch (err) {
-      setError((err as Error).message)
-    }
-  }, [brokerUrl])
+  useEffect(() => () => brokers.close(), [brokers])
+  const brokerList = JSON.stringify(brokerUrls)
+  useEffect(() => { brokers.updateUrls(JSON.parse(brokerList) as string[]) }, [brokers, brokerList])
 
   // Local history remains available while disconnected.
   useEffect(() => {
@@ -161,55 +165,71 @@ export default React.memo(function AppPage() {
         try { verified.push(await verifyNote(JSON.parse(note.raw) as UNTFrame)) }
         catch { /* Old cached notes must satisfy the current registry trust mapping. */ }
       }
-      if (!cancelled) setNotes(prev => {
-        const unique = new Map([...verified, ...prev].map(note => [note.jti, note]))
-        return [...unique.values()].sort((a, b) => a.issuedAt - b.issuedAt)
-      })
+      if (!cancelled) setNotes(prev => mergeNotes(prev, verified))
     }).catch(err => { if (!cancelled) setError((err as Error).message) })
     return () => { cancelled = true }
   }, [activeChannel, verifyNote])
 
   const joinedChannels = JSON.stringify(preferences.channels)
+  const connectedBrokers = JSON.stringify(connectedUrls)
   useEffect(() => {
-    setHistoryStatus(null)
-    if (!broker || !identity || !connected || !registryKey) return
+    setHistoryStatuses({})
+    if (!identity || !registryKey) return
+    const urls = JSON.parse(connectedBrokers) as string[]
+    if (!urls.length) return
     let cancelled = false
-    const sync = new PeerHistory({
-      fingerprint: 'sha256:' + identity.fingerprint,
-      peerId: historyPeerId.current,
-      privateKey: identity.privateKey,
-      keys: registryKeys,
-      getStake,
-      send: frame => broker.send(frame),
-      readPage: getHistoryPage,
-      save: saveNoteIfNew,
-      onNote: acceptNote,
-      onStatus: (channel, status) => { if (!cancelled && channel === activeChannelRef.current) setHistoryStatus(status) },
-      onError: err => { if (!cancelled) setError(err.message) },
-      batchSize: config.historyBatchSize,
-      maxFrameBytes: config.maxFrameBytes,
-      timeoutMs: config.historyTimeoutMs,
-    })
-    history.current = sync
+    const sessions = new Map<string, PeerHistory>()
+    for (const url of urls) {
+      sessions.set(url, new PeerHistory({
+        fingerprint: 'sha256:' + identity.fingerprint,
+        peerId: historyPeerId.current,
+        privateKey: identity.privateKey,
+        keys: registryKeys,
+        getStake,
+        // History replies and continuation requests stay on the arrival broker.
+        send: frame => brokers.sendTo(url, frame),
+        readPage: getHistoryPage,
+        save: saveNoteIfNew,
+        onNote: acceptNote,
+        onStatus: (channel, status) => { if (!cancelled && channel === activeChannelRef.current) setHistoryStatuses(prev => ({ ...prev, [url]: status })) },
+        onError: err => { if (!cancelled) setError(err.message) },
+        batchSize: config.historyBatchSize,
+        maxFrameBytes: config.maxFrameBytes,
+        timeoutMs: config.historyTimeoutMs,
+      }))
+    }
+    history.current = sessions
     void (async () => {
       try {
         const stake = await getStake()
-        for (const channel of JSON.parse(joinedChannels) as string[]) {
-          const frame = await buildCommand('subscribe', channel, stake, identity.privateKey)
-          if (cancelled) return
-          broker.send(frame)
-        }
-        if (activeChannel && !cancelled) await sync.start(activeChannel)
+        await Promise.all(urls.map(async url => {
+          try {
+            for (const channel of JSON.parse(joinedChannels) as string[]) {
+              const frame = await buildCommand('subscribe', channel, stake, identity.privateKey)
+              if (cancelled) return
+              brokers.sendTo(url, frame)
+            }
+            if (activeChannel && !cancelled) await sessions.get(url)!.start(activeChannel)
+          } catch (err) {
+            if (!cancelled) {
+              setError((err as Error).message)
+              setHistoryStatuses(prev => ({ ...prev, [url]: { phase: 'incomplete', peers: 0, received: 0 } }))
+            }
+          }
+        }))
       } catch (err) {
-        if (!cancelled) { setError((err as Error).message); setHistoryStatus({ phase: 'incomplete', peers: 0, received: 0 }) }
+        if (!cancelled) {
+          setError((err as Error).message)
+          setHistoryStatuses(Object.fromEntries(urls.map(url => [url, { phase: 'incomplete', peers: 0, received: 0 }])))
+        }
       }
     })()
     return () => {
       cancelled = true
-      sync.dispose()
-      if (history.current === sync) history.current = null
+      for (const session of sessions.values()) session.dispose()
+      if (history.current === sessions) history.current = new Map()
     }
-  }, [broker, joinedChannels, activeChannel, identity, connected, getStake, registryKey, registryKeys, acceptNote])
+  }, [brokers, joinedChannels, connectedBrokers, activeChannel, identity, getStake, registryKey, registryKeys, acceptNote])
 
   // Close settings on outside click
   useEffect(() => {
@@ -258,20 +278,22 @@ export default React.memo(function AppPage() {
 
   async function sendNote(content: string) {
     if (new TextEncoder().encode(content).length > config.maxNoteBytes) throw new Error(`Note exceeds the configured ${config.maxNoteBytes}-byte limit.`)
-    if (!broker || !identity || !registryKey || !connected || !activeChannel) throw new Error('Connect a broker, choose a registry, and join a channel before sending.')
+    if (!identity || !registryKey || !connected || !activeChannel) throw new Error('Connect a broker, choose a registry, and join a channel before sending.')
     const channel = activeChannel
     const stake = await getStake()
     const frame = await buildUnt(content, channel, stake, identity.privateKey, replyTo?.jti)
     const note = await verifyNote(frame)
-    broker.send(frame)
+    const publication = brokers.publish(frame)
+    if (publication.failed.length) setError(`Note sent, but ${publication.failed.length} broker connection(s) failed.`)
     try {
       await saveNoteIfNew(note)
     } catch {
       setError('Note was sent, but could not be saved in this browser.')
     }
     if (activeChannelRef.current === channel) {
-      setNotes(prev => prev.some(n => n.jti === note.jti) ? prev : [...prev, note])
+      setNotes(prev => mergeNotes(prev, [note]))
       setReplyTo(null)
+      setFollowToken(token => token + 1)
     }
   }
 
@@ -280,7 +302,8 @@ export default React.memo(function AppPage() {
     const url = normalizeUrl(brokerDraft, 'broker')
     if (!url) { setError('Enter a valid ws:// or wss:// broker URL.'); return }
     setError('')
-    setPreferences(prev => ({ ...prev, brokerUrl: url }))
+    setPreferences(prev => ({ ...prev, brokerUrls: [...new Set([...prev.brokerUrls, url])] }))
+    setBrokerDraft('')
   }
 
   async function connectRegistry() {
@@ -353,7 +376,7 @@ export default React.memo(function AppPage() {
     }
   }
 
-  const relayCount = connected ? 1 : 0
+  const relayCount = connectedUrls.length
 
   return (
     <div className="h-screen flex flex-col bg-black text-[#f4f1ea] overflow-hidden" style={{ fontFamily: 'Space Grotesk, sans-serif' }}>
@@ -372,12 +395,12 @@ export default React.memo(function AppPage() {
           onAddChannel={handleAddChannel}
         />
 
-        <main className="flex-1 min-w-0 overflow-y-auto">
-          {activeChannel && <div className="flex items-center justify-between gap-3 px-5 py-2 text-xs text-white/45 border-b border-white/5">
-            <span role="status">{!connected ? 'Offline · showing stored notes' : historyStatus?.phase === 'syncing' ? `Fetching peer history · ${historyStatus.received} notes received` : historyStatus?.phase === 'synced' ? `History received from ${historyStatus.peers} peer${historyStatus.peers === 1 ? '' : 's'}${historyStatus.skipped ? ` · ${historyStatus.skipped} unverified entries skipped` : ''}` : historyStatus?.phase === 'no-peers' ? 'No peers replied · stored notes remain available' : historyStatus?.phase === 'incomplete' ? 'History transfer incomplete · retry to continue' : 'Preparing peer history'}</span>
-            <button disabled={!connected || !registryKey || historyStatus?.phase === 'syncing'} onClick={() => { void history.current?.start(activeChannel) }} className="text-gold disabled:opacity-40 shrink-0">Refresh history</button>
+        <main className="flex flex-col flex-1 min-w-0 min-h-0 overflow-hidden">
+          {activeChannel && <div className="shrink-0 flex items-center justify-between gap-3 px-5 py-2 text-xs text-white/45 border-b border-white/5">
+            <span role="status">{!connected ? 'Offline · showing stored notes' : historyStatus?.phase === 'syncing' ? `Fetching peer history · ${historyStatus.received} notes received` : historyStatus?.phase === 'synced' ? `History checked on ${statusList.length} broker${statusList.length === 1 ? '' : 's'}${historyStatus.skipped ? ` · ${historyStatus.skipped} unverified entries skipped` : ''}` : historyStatus?.phase === 'no-peers' ? 'No peers replied · stored notes remain available' : historyStatus?.phase === 'incomplete' ? 'History transfer incomplete · retry to continue' : 'Preparing peer history'}</span>
+            <button disabled={!connected || !registryKey || historyStatus?.phase === 'syncing'} onClick={() => { for (const session of history.current.values()) void session.start(activeChannel) }} className="text-gold disabled:opacity-40 shrink-0">Refresh history</button>
           </div>}
-          <NoteList notes={notes} onReply={setReplyTo} emptyMessage={activeChannel ? "No notes in this channel yet." : "Add a channel to read and write notes."} />
+          <NoteFeed channel={activeChannel} notes={notes} onReply={setReplyTo} followToken={followToken} emptyMessage={activeChannel ? "No notes in this channel yet." : "Add a channel to read and write notes."} />
         </main>
 
         {/* Settings panel */}
@@ -452,18 +475,20 @@ export default React.memo(function AppPage() {
               <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.25)', letterSpacing: '0.15em', textTransform: 'uppercase', marginBottom: 8 }}>
                 Brokers
               </div>
-              <div className="flex items-center gap-3 px-3 py-2">
-                <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: connected ? 'rgba(74,222,128,0.7)' : 'rgba(248,113,113,0.5)' }} />
-                <span className="flex-1 truncate" style={{ fontSize: 12, color: 'rgba(255,255,255,0.5)', fontFamily: 'JetBrains Mono, monospace' }}>
-                  {brokerUrl || 'No broker configured'}
-                </span>
-                <span className="text-xs text-white/40">{connected ? 'Connected' : brokerUrl ? 'Reconnecting' : 'Disconnected'}</span>
-              </div>
+              {brokerUrls.length === 0 && <p className="text-xs text-white/40">No brokers configured</p>}
+              {brokerUrls.map(url => <div key={url} className="flex items-center gap-2 py-2">
+                <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: connections[url] ? 'rgba(74,222,128,0.7)' : 'rgba(248,113,113,0.5)' }} />
+                <div className="flex-1 min-w-0">
+                  <p className="truncate text-xs text-white/60" title={url}>{url}</p>
+                  <p className="text-[11px] text-white/40">{connections[url] ? 'Connected' : 'Connecting / retrying'}</p>
+                </div>
+                <button className="text-white/50 px-2" aria-label={`Remove broker ${url}`} title="Remove broker" onClick={() => setPreferences(prev => ({ ...prev, brokerUrls: prev.brokerUrls.filter(value => value !== url) }))}>×</button>
+              </div>)}
               <form onSubmit={updateBroker} className="flex flex-col gap-2 mt-3">
                 <label htmlFor="broker-url" className="text-xs text-white/50">Broker WebSocket URL</label>
                 <input id="broker-url" value={brokerDraft} onChange={e => setBrokerDraft(e.target.value)} placeholder="wss://" className="w-full bg-white/5 border border-white/10 rounded-lg p-2 text-xs" />
-                <button className="text-xs text-gold border border-white/10 rounded-lg p-2" type="submit">Apply broker</button>
-                {brokerUrl && <button type="button" className="text-xs text-white/50" onClick={() => setPreferences(prev => ({ ...prev, brokerUrl: '' }))}>Disconnect broker</button>}
+                <button className="text-xs text-gold border border-white/10 rounded-lg p-2" type="submit">Add broker</button>
+                {brokerUrls.length > 0 && <button type="button" className="text-xs text-white/50" onClick={() => setPreferences(prev => ({ ...prev, brokerUrls: [] }))}>Disconnect all brokers</button>}
               </form>
             </div>
           </div>

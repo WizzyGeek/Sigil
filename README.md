@@ -223,9 +223,19 @@ A note that passes all four steps is proven to have been:
 
 ---
 
+### Multiple broker connections and the timeline
+
+The topology is **bipartite**: connections are only between clients and brokers. Brokers do not communicate with other brokers, and clients do not open direct peer connections.
+
+A client can add several broker WebSocket URLs in **Settings → Brokers**. Every connection has independent status and reconnection behavior; removing one leaves the others connected. The configured URL list is saved per identity, and older saved single-broker settings migrate automatically.
+
+Newly authored notes are signed **once** and published with the **same JTI** to every connected broker. Received notes are verified and saved locally; **they are never automatically forwarded to another broker**. A note learned on broker 1 becomes available on broker 2 only when a broker-2 peer requests history and this client responds through broker 2. History requests, replies, pagination and request correlation are kept on their respective broker connection.
+
+The client combines local notes, live arrivals and history from all broker connections into one timeline, deduplicated globally by JTI and sorted by signed `iat` (then JTI for stable same-second ordering). Signature and registry-issuer checks apply before an incoming note can enter that shared cache. Initial channel loads follow the latest note, and new notes continue to scroll down while the reader is near the bottom. Scrolling up pauses automatic following; **Latest note** returns to the bottom. Sending a note also moves to the latest position.
+
 ### Requesting History
 
-Brokers store no notes. A client subscribes to its joined channels and automatically requests history for the active channel after connecting, reconnecting, or switching channels. **Refresh history** restarts the exchange manually.
+Brokers store no notes. A client subscribes to its joined channels on each connected broker and independently requests history for the active channel after connecting, reconnecting, or switching channels. **Refresh history** restarts the exchange manually.
 
 1. The requester sends a fresh, signed `request_notes` with a snapshot boundary `till`. The initial boundary includes notes from the current second.
 2. Every connected peer in that channel can respond, including a sole peer. There is no random sampling that can leave a request unanswered.
@@ -479,7 +489,8 @@ For verified `note` and `request_notes` broadcasts, the broker drops frames olde
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `VITE_REGISTRY_URL` | no | Suggested HTTPS registry URL (HTTP is allowed only on loopback for development), pre-filled and editable during onboarding (e.g. `http://localhost:8000`). If unset, the field starts empty. |
-| `VITE_DEFAULT_BROKER_URL` | no | Suggested broker WebSocket URL (`ws://`, `wss://`, or same-origin `/ws`). Editable in Settings and saved per identity. If unset, connect a broker in Settings. |
+| `VITE_DEFAULT_BROKER_URLS` | no | JSON array of suggested broker URLs, e.g. `["/ws","wss://relay.example/ws"]`. Used for new identities. A valid list (including `[]`) takes precedence over the legacy single suggestion. Add/remove connections in Settings. |
+| `VITE_DEFAULT_BROKER_URL` | no | Legacy single suggested WebSocket URL (`ws://`, `wss://`, or same-origin `/ws`), used when the JSON list is absent/invalid. If neither suggestion is set, add brokers in Settings. |
 | `VITE_DEFAULT_CHANNELS` | no | Comma-separated suggested channels for a new identity. If unset, join a channel using Add Channel. |
 | `VITE_MAX_NOTE_BYTES` | no | Composer UTF-8 byte limit (default `4096`); match the broker’s `MAX_CONTENT_BYTES`. |
 | `VITE_MAX_FRAME_BYTES` | no | Serialized history relay frame limit (default `262144`, minimum `1024`); match the broker’s `MAX_FRAME_BYTES`. |
@@ -495,7 +506,7 @@ Start Uvicorn with `--no-proxy-headers` (already configured in Docker and the Pr
 
 Client `VITE_*` variables are public build-time values; rebuild/redeploy the client to change them. They must never contain secrets. User-saved connection settings take precedence over deployment suggestions. Registry requests reject redirects and rely on browser TLS certificate validation. `DEV_BROKER_PROXY_URL` configures the Vite server only; it does not configure production hosting. Compose maps `/ws` to the broker container and preserves the registry’s public issuer when mapping its key endpoint.
 
-Broker choices, channels, registry accounts (including their handles), and the selected stake provider are stored locally per identity. Switching providers changes challenge and stake requests; incoming notes are verified using the key bound to their signed stake’s `iss` domain. The client derives each issuer from the configured registry URL’s host and port; unknown issuers and signatures made with another registry’s key are rejected. The same binding applies to control frames, fetched stakes, restored identities, and cached notes. Configure one registry URL per issuer; different paths on the same host cannot represent separate registry identities. The broker discovers public registry keys by issuer and caches them; local/private registries require an explicit broker endpoint mapping.
+Broker URL lists, channels, registry accounts (including their handles), and the selected stake provider are stored locally per identity. Switching providers changes challenge and stake requests; incoming notes are verified using the key bound to their signed stake’s `iss` domain. The client derives each issuer from the configured registry URL’s host and port; unknown issuers and signatures made with another registry’s key are rejected. The same binding applies to control frames, fetched stakes, restored identities, and cached notes. Configure one registry URL per issuer; different paths on the same host cannot represent separate registry identities. The broker discovers public registry keys by issuer and caches them; local/private registries require an explicit broker endpoint mapping.
 
 The browser client supports generating keys, importing unencrypted PKCS#8 PEM keys, and restoring an existing registered identity through **Import Identity**. If browser identity metadata is lost but its IndexedDB key remains, **Restore the key stored in this browser** can recover it without exporting the private key. Newly generated registration keys are staged separately and reused after interrupted attempts; the active key is replaced only after registration or restoration succeeds. Private keys are stored as non-extractable keys and cannot be exported. Key rotation and revocation are not implemented in the browser client; use the registry API for those operations. Entering a recovery email during onboarding sends only its normalized SHA-256 hash. Recovery delivery is unfinished: the registry email-init endpoint currently returns a development debug token and does not send an email.
 
@@ -550,7 +561,7 @@ POST /revoke/email-confirm          → { revoked: true, fingerprint }
 
 ### Client validation and remaining functionality
 
-The client regression suite covers issuer/key binding, signed peer-history pagination, same-second cursors, multiple peers, overlapping data, same-identity sessions, frame-size budgeting, retries after lost pages or temporary storage failures, mixed trusted/untrusted history, cancellation, and unsolicited reply rejection. Broker tests cover request-correlated routing in addition to signature validation and bounded caches. Browser checks use isolated profiles to verify IndexedDB migration and actual peer transfers through the local broker.
+The client regression suite covers issuer/key binding, signed peer-history pagination, same-second cursors, multiple peers, overlapping data, same-identity sessions, multiple independent brokers, global timeline sorting/deduplication, frame-size budgeting, retries after lost pages or temporary storage failures, mixed trusted/untrusted history, cancellation, and unsolicited reply rejection. Broker tests cover request-correlated routing in addition to signature validation and bounded caches. Browser checks use isolated profiles to verify IndexedDB migration and actual peer transfers through the local broker.
 
 New note and relay signatures use consistent canonical JSON across JavaScript, Go, and Python: recursively sorted object keys, compact encoding, UTF-8 text without HTML escaping, and escaped U+2028/U+2029 separators. This avoids failures for notes containing `&`, `<`, emoji, or accented text. Verification binds each stake issuer to its registry key before trusting the author key.
 

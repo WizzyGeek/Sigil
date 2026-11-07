@@ -27,7 +27,7 @@ test('no environment suggestions means no invented broker or channels', () => {
   const prefs = loadPreferences('first')
   assert.deepEqual(prefs.channels, [])
   assert.equal(prefs.activeChannel, '')
-  assert.equal(prefs.brokerUrl, '')
+  assert.deepEqual(prefs.brokerUrls, [])
   assert.deepEqual(prefs.registries, [])
 })
 
@@ -35,7 +35,7 @@ test('connection choices and different registry handles survive reload per ident
   storage.clear()
   const initial = { url: 'https://registry-a.test', handle: '@alice@a' }
   const prefs = loadPreferences('alice', initial)
-  prefs.brokerUrl = 'wss://broker.test/ws'
+  prefs.brokerUrls = ['wss://broker.test/ws', 'wss://other-broker.test/ws']
   prefs.channels = ['test-channel']
   prefs.activeChannel = 'test-channel'
   prefs.registries.push({ url: 'https://registry-b.test', handle: '@different@b' })

@@ -3,10 +3,22 @@ function positiveInteger(value: unknown, fallback: number, min = 1, max = Number
   return Number.isFinite(number) && number >= min ? Math.min(max, Math.floor(number)) : fallback
 }
 
+function suggestedBrokers(): string[] {
+  const plural = import.meta.env.VITE_DEFAULT_BROKER_URLS as string | undefined
+  if (plural !== undefined) {
+    try {
+      const parsed: unknown = JSON.parse(plural)
+      if (Array.isArray(parsed)) return parsed.filter((value): value is string => typeof value === 'string')
+    } catch { /* Fall back to the legacy single suggestion for invalid JSON. */ }
+  }
+  const single = (import.meta.env.VITE_DEFAULT_BROKER_URL as string | undefined) ?? ''
+  return single ? [single] : []
+}
+
 /** Deployment values are suggestions; user connection choices live in preferences. */
 export const config = {
   registryUrl: (import.meta.env.VITE_REGISTRY_URL as string | undefined) ?? '',
-  brokerUrl: (import.meta.env.VITE_DEFAULT_BROKER_URL as string | undefined) ?? '',
+  brokerUrls: suggestedBrokers(),
   initialChannels: ((import.meta.env.VITE_DEFAULT_CHANNELS as string | undefined) ?? '')
     .split(',').map(value => value.trim()).filter(Boolean),
   registryTimeoutMs: positiveInteger(import.meta.env.VITE_REGISTRY_TIMEOUT_MS, 10000, 500, 120000),
